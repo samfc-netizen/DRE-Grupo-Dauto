@@ -900,6 +900,8 @@ if not excel_path:
     st.stop()
 
 
+
+EXCEL_PATH = excel_path  # alias padrão
 def excel_signature(path: str):
     """
     Assinatura do arquivo para invalidar caches quando o Excel for atualizado (mesmo mantendo o mesmo nome).
@@ -908,7 +910,10 @@ def excel_signature(path: str):
     stt = os.stat(path)
     return (stt.st_mtime_ns, stt.st_size)
 
-EXCEL_SIG = excel_signature(EXCEL_PATH)
+
+# Assinatura atual do arquivo (usada para invalidar st.cache_data quando o Excel muda)
+sig = excel_signature(EXCEL_PATH)
+EXCEL_SIG = sig
 
 st.sidebar.caption(f"Excel: **{excel_path}**")
 sheet_names = get_sheet_names(excel_path, sig)
