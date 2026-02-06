@@ -280,8 +280,10 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         return
 
     # Exceção solicitada: na DRE, dentro de DEDUÇÕES (IMPOSTOS SOBRE VENDAS),
-    # desconsiderar a despesa '02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA' (no DFC permanece igual).
-    _DED_EXCL_DRE = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
+    # desconsiderar a despesa '02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA (3 - DESPESAS)' (no DFC permanece igual).
+    _DED_EXCL_CODE = "02.07.008"
+    _DED_EXCL_FULL = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
+
     def _norm_txt(x):
         s = "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
         # Normaliza para comparação robusta (remove acentos/diacríticos e padroniza hífens/espaços)
@@ -292,12 +294,32 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         s = re.sub(r"\s+", " ", s).strip().upper()
         return s
 
+    _EXCL_CODE_N = _norm_txt(_DED_EXCL_CODE)
+    _EXCL_FULL_N = _norm_txt(_DED_EXCL_FULL)
+
+    def _mask_excl_ded(df: pd.DataFrame) -> pd.Series:
+        """Máscara de exclusão (somente para DEDUÇÕES no DRE).
+        Checa em múltiplas colunas porque, dependendo da base, a descrição pode estar em:
+        - DESPESA
+        - CONTA DE RESULTADO
+        - HISTÓRICO
+        """
+        cols = [c for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO"] if c in df.columns]
+        if not cols:
+            return pd.Series(False, index=df.index)
+        msk = pd.Series(False, index=df.index)
+        for c in cols:
+            s = df[c].apply(_norm_txt)
+            # Remove por código (mais robusto) e também por match do texto completo (quando disponível)
+            msk |= s.str.contains(_EXCL_CODE_N, na=False) | (s == _EXCL_FULL_N)
+        return msk
+
+
 
     ded_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")
     pes_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")
     i_ded = i[ded_mask].copy()
-    if "DESPESA" in i_ded.columns:
-        i_ded = i_ded[i_ded["DESPESA"].apply(_norm_txt) != _norm_txt(_DED_EXCL_DRE)]
+    i_ded = i_ded[~_mask_excl_ded(i_ded)]
     deducoes_by_month = {m: float(i_ded.groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
     pessoal_by_month = {m: float(i[pes_mask].groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
 
@@ -489,8 +511,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         base_raw = base_raw[base_raw["_mes_ref"].isin(meses_nums_drill)].copy()
         if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
             base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")]
-            if "DESPESA" in base_raw.columns:
-                base_raw = base_raw[base_raw["DESPESA"].apply(_norm_txt) != _norm_txt(_DED_EXCL_DRE)]
+            base_raw = base_raw[~_mask_excl_ded(base_raw)]
         else:
             base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")]
     else:
