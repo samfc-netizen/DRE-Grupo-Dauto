@@ -74,14 +74,14 @@ def parse_mes(v):
 
 
 @st.cache_data(show_spinner=False)
-def get_sheet_names(excel_path: str):
+def get_sheet_names(excel_path: str, sig):
     try:
         return pd.ExcelFile(excel_path).sheet_names
     except Exception:
         return []
 
 @st.cache_data(show_spinner=False)
-def read_sheet(excel_path: str, sheet_name: str):
+def read_sheet(excel_path: str, sheet_name: str, sig):
     """Lê uma aba do Excel com cache (melhora muito a navegação no Streamlit)."""
     try:
         df = pd.read_excel(excel_path, sheet_name=sheet_name)
@@ -91,9 +91,9 @@ def read_sheet(excel_path: str, sheet_name: str):
     return df
 
 @st.cache_data(show_spinner=False)
-def prep_geral_year(excel_path: str, ano_ref: int):
+def prep_geral_year(excel_path: str, ano_ref: int, sig):
     """Carrega e prepara a aba DRE E DFC GERAL 1x por ano (parse de datas/valores)."""
-    df = read_sheet(excel_path, "DRE E DFC GERAL")
+    df = read_sheet(excel_path, "DRE E DFC GERAL", sig)
     if df is None:
         return None
     g = df.copy()
@@ -105,9 +105,9 @@ def prep_geral_year(excel_path: str, ano_ref: int):
     return g
 
 @st.cache_data(show_spinner=False)
-def prep_impostos_folha_dre(excel_path: str, ano_ref: int):
+def prep_impostos_folha_dre(excel_path: str, ano_ref: int, sig):
     """IMPOSTOS E FOLHA para DRE: considera shift +1 mês e filtra pelo ano de referência."""
-    df = read_sheet(excel_path, "IMPOSTOS E FOLHA")
+    df = read_sheet(excel_path, "IMPOSTOS E FOLHA", sig)
     if df is None:
         return None
     i = df.copy()
@@ -120,9 +120,9 @@ def prep_impostos_folha_dre(excel_path: str, ano_ref: int):
     return i
 
 @st.cache_data(show_spinner=False)
-def prep_impostos_folha_dfc(excel_path: str, ano_ref: int):
+def prep_impostos_folha_dfc(excel_path: str, ano_ref: int, sig):
     """IMPOSTOS E FOLHA para DFC: usa o mês/ano do pagamento (sem shift)."""
-    df = read_sheet(excel_path, "IMPOSTOS E FOLHA")
+    df = read_sheet(excel_path, "IMPOSTOS E FOLHA", sig)
     if df is None:
         return None
     i = df.copy()
@@ -247,10 +247,10 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     meses_pt = meses_pt if len(meses_pt) > 0 else MESES_PT
     meses_nums = [MES_PT_TO_NUM[m] for m in meses_pt]
 
-    df_receita = read_sheet(excel_path, "RECEITA")
-    df_nfs = read_sheet(excel_path, "NOTAS EMITIDAS")
-    df_geral = read_sheet(excel_path, "DRE E DFC GERAL")
-    df_if = read_sheet(excel_path, "IMPOSTOS E FOLHA")
+    df_receita = read_sheet(excel_path, "RECEITA", sig)
+    df_nfs = read_sheet(excel_path, "NOTAS EMITIDAS", sig)
+    df_geral = read_sheet(excel_path, "DRE E DFC GERAL", sig)
+    df_if = read_sheet(excel_path, "IMPOSTOS E FOLHA", sig)
 
     missing = [n for n, df in [("RECEITA", df_receita), ("NOTAS EMITIDAS", df_nfs),
                                ("IMPOSTOS E FOLHA", df_if), ("DRE E DFC GERAL", df_geral)] if df is None]
@@ -273,7 +273,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     if not req_if.issubset(set(df_if.columns)):
         st.error("Na aba IMPOSTOS E FOLHA preciso das colunas: 'CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'.")
         return
-    i = prep_impostos_folha_dre(excel_path, ano_ref)
+    i = prep_impostos_folha_dre(excel_path, ano_ref, sig)
     if i is None:
         st.error("Não encontrei a aba IMPOSTOS E FOLHA.")
         return
@@ -284,7 +284,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     pessoal_by_month = {m: float(i[pes_mask].groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
 
     # Geral por prefixos
-    g = prep_geral_year(excel_path, ano_ref)
+    g = prep_geral_year(excel_path, ano_ref, sig)
     if g is None:
         st.error("Não encontrei a aba DRE E DFC GERAL.")
         return
@@ -585,8 +585,8 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     meses_pt = meses_pt if len(meses_pt) > 0 else MESES_PT
     meses_nums = [MES_PT_TO_NUM[m] for m in meses_pt]
 
-    df_rec = read_sheet(excel_path, "RECEBIMENTO")
-    df_geral = read_sheet(excel_path, "DRE E DFC GERAL")
+    df_rec = read_sheet(excel_path, "RECEBIMENTO", sig)
+    df_geral = read_sheet(excel_path, "DRE E DFC GERAL", sig)
 
     missing = [n for n, df in [("RECEBIMENTO", df_rec), ("DRE E DFC GERAL", df_geral)] if df is None]
     if missing:
@@ -604,7 +604,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.error("Na aba DRE E DFC GERAL preciso das colunas: 'CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'.")
         return
 
-    g = prep_geral_year(excel_path, ano_ref)
+    g = prep_geral_year(excel_path, ano_ref, sig)
     if g is None:
         st.error("Não encontrei a aba DRE E DFC GERAL.")
         return
@@ -899,8 +899,19 @@ if not excel_path:
     st.sidebar.error("Não encontrei nenhum Excel (.xlsx/.xlsm/.xls) na mesma pasta do app.")
     st.stop()
 
+
+def excel_signature(path: str):
+    """
+    Assinatura do arquivo para invalidar caches quando o Excel for atualizado (mesmo mantendo o mesmo nome).
+    Retorna (mtime_ns, size).
+    """
+    stt = os.stat(path)
+    return (stt.st_mtime_ns, stt.st_size)
+
+EXCEL_SIG = excel_signature(EXCEL_PATH)
+
 st.sidebar.caption(f"Excel: **{excel_path}**")
-sheet_names = get_sheet_names(excel_path)
+sheet_names = get_sheet_names(excel_path, sig)
 if not sheet_names:
     st.sidebar.error(f"Não consegui abrir '{excel_path}'.")
     st.stop()
@@ -913,11 +924,11 @@ meses_pt_sel = st.sidebar.multiselect("Meses", options=MESES_PT, default=MESES_P
 
 anos = set()
 for sheet in ["RECEITA", "NOTAS EMITIDAS", "RECEBIMENTO"]:
-    df_tmp = read_sheet(excel_path, sheet)
+    df_tmp = read_sheet(excel_path, sheet, sig)
     if df_tmp is not None and "ANO" in df_tmp.columns:
         anos |= set(pd.to_numeric(df_tmp["ANO"], errors="coerce").dropna().astype(int).unique().tolist())
 
-df_tmp = read_sheet(excel_path, "DRE E DFC GERAL")
+df_tmp = read_sheet(excel_path, "DRE E DFC GERAL", sig)
 if df_tmp is not None and "DTA.PAG" in df_tmp.columns:
     d = pd.to_datetime(df_tmp["DTA.PAG"], errors="coerce", dayfirst=True)
     anos |= set(d.dt.year.dropna().astype(int).unique().tolist())
