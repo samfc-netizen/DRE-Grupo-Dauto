@@ -1,5 +1,6 @@
 # GERAL.py
 import re
+import unicodedata
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -283,8 +284,14 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     _DED_EXCL_DRE = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
     def _norm_txt(x):
         s = "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
+        # Normaliza para comparação robusta (remove acentos/diacríticos e padroniza hífens/espaços)
+        s = unicodedata.normalize("NFKD", s)
+        s = "".join(ch for ch in s if not unicodedata.combining(ch))
+        s = s.replace("–", "-").replace("—", "-")
+        s = re.sub(r"\s*[-]+\s*", "-", s)     # remove espaços ao redor de hífens
         s = re.sub(r"\s+", " ", s).strip().upper()
         return s
+
 
     ded_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")
     pes_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")
