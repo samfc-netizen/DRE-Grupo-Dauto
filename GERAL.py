@@ -278,9 +278,20 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.error("Não encontrei a aba IMPOSTOS E FOLHA.")
         return
 
+    # Exceção solicitada: na DRE, dentro de DEDUÇÕES (IMPOSTOS SOBRE VENDAS),
+    # desconsiderar a despesa '02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA' (no DFC permanece igual).
+    _DED_EXCL_DRE = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
+    def _norm_txt(x):
+        s = "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
+        s = re.sub(r"\s+", " ", s).strip().upper()
+        return s
+
     ded_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")
     pes_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")
-    deducoes_by_month = {m: float(i[ded_mask].groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
+    i_ded = i[ded_mask].copy()
+    if "DESPESA" in i_ded.columns:
+        i_ded = i_ded[i_ded["DESPESA"].apply(_norm_txt) != _norm_txt(_DED_EXCL_DRE)]
+    deducoes_by_month = {m: float(i_ded.groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
     pessoal_by_month = {m: float(i[pes_mask].groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
 
     # Geral por prefixos
@@ -471,6 +482,8 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         base_raw = base_raw[base_raw["_mes_ref"].isin(meses_nums_drill)].copy()
         if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
             base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")]
+            if "DESPESA" in base_raw.columns:
+                base_raw = base_raw[base_raw["DESPESA"].apply(_norm_txt) != _norm_txt(_DED_EXCL_DRE)]
         else:
             base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")]
     else:
