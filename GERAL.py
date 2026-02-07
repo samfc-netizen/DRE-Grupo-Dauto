@@ -342,7 +342,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     # então NÃO exigimos esta aba aqui.
     i = None
     if df_if is None:
-        st.info("Aba IMPOSTOS E FOLHA não encontrada. O DRE será exibido normalmente; no DFC, itens que dependem dessa aba ficarão zerados.")
+        pass
     else:
         req_if = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
         if not req_if.issubset(set(df_if.columns)):
@@ -355,7 +355,9 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     # ===== DRE: Deduções e Pessoal (mês +1) =====
     # Agora puxamos essas duas linhas da aba "DRE E DFC GERAL", coluna "CONTA DE RESULTADO",
     # sempre com o mês "à frente": exibe mês m usando dados do mês (m+1).
-    g = prep_geral_year(excel_path, ano_ref, sig)
+    g_cur = prep_geral_year(excel_path, ano_ref, sig)
+    g_next = prep_geral_year(excel_path, int(ano_ref) + 1, sig)
+    g = g_cur
     if g is None:
         st.error("Não encontrei a aba DRE E DFC GERAL.")
         return
@@ -373,7 +375,26 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
                     break
         src = d.groupby("_mes")["_v"].sum()
         # Shift: exibe m usando dados de m+1 (se não existir, zera)
-        return {m: float(src.get(m + 1, 0.0)) for m in range(1, 13)}
+        # Shift: exibe mês m usando dados de (m+1). Em dezembro, busca janeiro do próximo ano.
+        src_next = None
+        if "g_next" in locals() and g_next is not None:
+            dn = g_next[g_next["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)].copy()
+            if exclude_icmsst and (not dn.empty):
+                target_norm = _norm_txt(_DED_EXCL_DRE)
+                for c2 in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                    if c2 in dn.columns:
+                        s2 = dn[c2].astype(str).apply(_norm_txt)
+                        dn = dn[~s2.str.contains(target_norm, na=False)]
+                        dn = dn[~s2.str.contains("02.07.008", na=False)]
+                        break
+            src_next = dn.groupby("_mes")["_v"].sum()
+        out = {}
+        for m in range(1, 13):
+            if m < 12:
+                out[m] = float(src.get(m + 1, 0.0))
+            else:
+                out[m] = float((src_next.get(1, 0.0) if src_next is not None else 0.0))
+        return out
 
     deducoes_by_month = _sum_by_prefix_shift("00004 -", exclude_icmsst=True)
     pessoal_by_month  = _sum_by_prefix_shift("00006 -", exclude_icmsst=False)
@@ -705,7 +726,9 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.error("Na aba DRE E DFC GERAL preciso das colunas: 'CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'.")
         return
 
-    g = prep_geral_year(excel_path, ano_ref, sig)
+    g_cur = prep_geral_year(excel_path, ano_ref, sig)
+    g_next = prep_geral_year(excel_path, int(ano_ref) + 1, sig)
+    g = g_cur
     if g is None:
         st.error("Não encontrei a aba DRE E DFC GERAL.")
         return
