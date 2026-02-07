@@ -1,3 +1,17 @@
+
+    # IMPOSTOS E FOLHA é OPCIONAL nesta página.
+    # (Você pediu para DEDUÇÕES e PESSOAL puxarem da aba "DRE E DFC GERAL"/DRE; então não exigimos esta aba aqui.)
+    i = None
+    if df_if is None:
+        st.info("Aba IMPOSTOS E FOLHA não encontrada. O DRE será exibido normalmente; no DFC, itens que dependem dessa aba ficarão zerados.")
+    else:
+        req_if = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
+        if not req_if.issubset(set(df_if.columns)):
+            st.warning("Aba IMPOSTOS E FOLHA encontrada, mas faltam colunas ('CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'). Ela será ignorada nesta página.")
+        else:
+            i = prep_impostos_folha_dre(excel_path, ano_ref, sig)
+            if i is None:
+                st.warning("Aba IMPOSTOS E FOLHA encontrada, mas não foi possível processá-la. Ela será ignorada nesta página.")
 # GERAL.py
 import re
 import pandas as pd
@@ -302,10 +316,6 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
 
     missing = [n for n, df in [("RECEITA", df_receita), ("NOTAS EMITIDAS", df_nfs),
                                ("DRE E DFC GERAL", df_geral)] if df is None]
-    # Aba "IMPOSTOS E FOLHA" é opcional para esta página. Se não existir, o DRE funciona normalmente
-    # e o DFC zera apenas as parcelas que dependem dela.
-    if df_if is None:
-        st.warning("Aba IMPOSTOS E FOLHA não encontrada. O DRE será exibido normalmente; no DFC, itens que dependem dessa aba ficarão zerados.")
     if missing:
         st.error(f"Faltam abas no Excel: {', '.join(missing)}")
         return
