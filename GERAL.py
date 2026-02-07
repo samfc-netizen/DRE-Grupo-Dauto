@@ -1,24 +1,31 @@
-
-    # IMPOSTOS E FOLHA é OPCIONAL nesta página.
-    # (Você pediu para DEDUÇÕES e PESSOAL puxarem da aba "DRE E DFC GERAL"/DRE; então não exigimos esta aba aqui.)
-    i = None
-    if df_if is None:
-        st.info("Aba IMPOSTOS E FOLHA não encontrada. O DRE será exibido normalmente; no DFC, itens que dependem dessa aba ficarão zerados.")
-    else:
-        req_if = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
-        if not req_if.issubset(set(df_if.columns)):
-            st.warning("Aba IMPOSTOS E FOLHA encontrada, mas faltam colunas ('CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'). Ela será ignorada nesta página.")
-        else:
-            i = prep_impostos_folha_dre(excel_path, ano_ref, sig)
-            if i is None:
-                st.warning("Aba IMPOSTOS E FOLHA encontrada, mas não foi possível processá-la. Ela será ignorada nesta página.")
 # GERAL.py
 import re
+import unicodedata
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 import os
 import glob
+
+# =========================
+# Normalização de texto (para filtros robustos)
+# =========================
+_DED_EXCL_DRE = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
+
+def _norm_txt(s: object) -> str:
+    """Normaliza texto: remove acentos, padroniza hífens/espaços e coloca em minúsculas."""
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return ""
+    t = str(s)
+    # NBSP e hífens diferentes
+    t = t.replace("\u00a0", " ").replace("–", "-").replace("—", "-")
+    # remove acentos
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    # normaliza espaços
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
 
 MESES_PT = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
 MES_NUM_TO_PT = {1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN",
@@ -330,63 +337,48 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         return
     compras_by_month = agg_by_month_from_ano_mes(df_nfs, "NFS EMITIDAS", "ANO", "MÊS", ano_ref)
 
-    # IMPOSTOS E FOLHA (para DRE mantém shift +1 mês)
-    req_if = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
-    if not req_if.issubset(set(df_if.columns)):
-        st.error("Na aba IMPOSTOS E FOLHA preciso das colunas: 'CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'.")
-        return
-    i = prep_impostos_folha_dre(excel_path, ano_ref, sig)
-    if i is None:
-        st.error("Não encontrei a aba IMPOSTOS E FOLHA.")
-        return
-
-    
-    # ===== DRE: Deduções e Pessoal =====
-    # Agora puxamos essas duas linhas da aba DRE (não mais de IMPOSTOS E FOLHA),
-    # usando sempre o mês "à frente":
-    #   - Se Janeiro, busca Fevereiro
-    #   - Se Fevereiro, busca Março
-    #   - ... (sempre +1 mês)
-    #   - Se não existir o mês seguinte, retorna 0
-    d_dre = prep_dre_sheet_year(excel_path, ano_ref, sig)
-    if d_dre is None:
-        # Se a aba DRE não existir, mantém zerado (sem quebrar a estrutura)
-        deducoes_by_month = {m: 0.0 for m in range(1, 13)}
-        pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
+    # IMPOSTOS E FOLHA é OPCIONAL nesta página (DRE Geral).
+    # Você pediu para DEDUÇÕES e PESSOAL puxarem da aba "DRE E DFC GERAL" (mês +1),
+    # então NÃO exigimos esta aba aqui.
+    i = None
+    if df_if is None:
+        st.info("Aba IMPOSTOS E FOLHA não encontrada. O DRE será exibido normalmente; no DFC, itens que dependem dessa aba ficarão zerados.")
     else:
-        # normaliza para encontrar a conta de resultado
-        col_cr = "CONTA DE RESULTADO" if "CONTA DE RESULTADO" in d_dre.columns else None
-
-        if col_cr is None:
-            deducoes_by_month = {m: 0.0 for m in range(1, 13)}
-            pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
+        req_if = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
+        if not req_if.issubset(set(df_if.columns)):
+            st.warning("Aba IMPOSTOS E FOLHA encontrada, mas faltam colunas (CONTA DE RESULTADO, DTA.PAG, VAL.PAG). Ela será ignorada nesta página.")
         else:
-            ded_mask = d_dre[col_cr].astype(str).str.strip().str.startswith("00004 -")
-            pes_mask = d_dre[col_cr].astype(str).str.strip().str.startswith("00006 -")
+            i = prep_impostos_folha_dre(excel_path, ano_ref, sig)
+            if i is None:
+                st.warning("Aba IMPOSTOS E FOLHA encontrada, mas não foi possível processá-la. Ela será ignorada nesta página.")
 
-            # Base mês origem (sem shift)
-            d_ded = d_dre[ded_mask].copy()
-            # Exclusão ICMS-ST (apenas na composição do DRE em Deduções)
-            for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
-                if c in d_ded.columns:
-                    d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains(_norm_txt(_DED_EXCL_DRE), na=False)]
-                    # também exclui só pelo código, caso o texto venha diferente
-                    d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains("02.07.008", na=False)]
-                    break
-
-            src_ded = d_ded.groupby("_mes")["_v"].sum()
-            src_pes = d_dre[pes_mask].groupby("_mes")["_v"].sum()
-
-            # Shift: exibe m usando dados de m+1
-            deducoes_by_month = {m: float(src_ded.get(m + 1, 0.0)) for m in range(1, 13)}
-            pessoal_by_month  = {m: float(src_pes.get(m + 1, 0.0)) for m in range(1, 13)}
-
-
-    # Geral por prefixos
+    # ===== DRE: Deduções e Pessoal (mês +1) =====
+    # Agora puxamos essas duas linhas da aba "DRE E DFC GERAL", coluna "CONTA DE RESULTADO",
+    # sempre com o mês "à frente": exibe mês m usando dados do mês (m+1).
     g = prep_geral_year(excel_path, ano_ref, sig)
     if g is None:
         st.error("Não encontrei a aba DRE E DFC GERAL.")
         return
+
+    def _sum_by_prefix_shift(prefix: str, exclude_icmsst: bool = False) -> dict:
+        d = g[g["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)].copy()
+        if exclude_icmsst and (not d.empty):
+            target_norm = _norm_txt(_DED_EXCL_DRE)
+            # tenta excluir pelo texto completo ou pelo código 02.07.008 (apenas no DRE)
+            for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                if c in d.columns:
+                    s_norm = d[c].astype(str).apply(_norm_txt)
+                    d = d[~s_norm.str.contains(target_norm, na=False)]
+                    d = d[~s_norm.str.contains("02.07.008", na=False)]
+                    break
+        src = d.groupby("_mes")["_v"].sum()
+        # Shift: exibe m usando dados de m+1 (se não existir, zera)
+        return {m: float(src.get(m + 1, 0.0)) for m in range(1, 13)}
+
+    deducoes_by_month = _sum_by_prefix_shift("00004 -", exclude_icmsst=True)
+    pessoal_by_month  = _sum_by_prefix_shift("00006 -", exclude_icmsst=False)
+
+    # Geral por prefixos
 
     def sum_by_prefix(prefix: str):
         mask = g["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)
@@ -565,29 +557,23 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.info("Compras vêm da aba NOTAS EMITIDAS (NFS EMITIDAS). Drill de despesas/histórico de compras depende de detalhamento por fornecedor/nota.")
         return
 
-        if grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
-            # Drill dessas duas contas agora vem da aba DRE (com mês à frente).
-            d_dre_drill = prep_dre_sheet_year(excel_path, ano_ref, sig)
-            if d_dre_drill is None:
-                base_raw = pd.DataFrame()
-            else:
-                # meses selecionados no drill são os meses "exibidos" -> buscamos o mês seguinte na base
-                meses_src = [m + 1 for m in meses_nums_drill if m is not None and int(m) < 12]
-                base_raw = d_dre_drill[d_dre_drill["_mes"].isin(meses_src)].copy()
-
-                if "CONTA DE RESULTADO" in base_raw.columns:
-                    if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
-                        base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")]
-                        # Excluir ICMS-ST na composição do DRE
-                        for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
-                            if c in base_raw.columns:
-                                base_raw = base_raw[~base_raw[c].astype(str).apply(_norm_txt).str.contains(_norm_txt(_DED_EXCL_DRE), na=False)]
-                                base_raw = base_raw[~base_raw[c].astype(str).apply(_norm_txt).str.contains("02.07.008", na=False)]
-                                break
-                    else:
-                        base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")]
-                else:
-                    base_raw = pd.DataFrame()
+    if grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
+        # Drill dessas duas contas vem da aba DRE E DFC GERAL com mês à frente (m+1).
+        meses_src = [m + 1 for m in meses_nums_drill if m is not None and int(m) < 12]
+        base_raw = g[g["_mes"].isin(meses_src)].copy()
+        if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
+            base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")]
+            # Excluir ICMS-ST na composição do DRE (apenas aqui)
+            if not base_raw.empty:
+                target_norm = _norm_txt(_DED_EXCL_DRE)
+                for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                    if c in base_raw.columns:
+                        s_norm = base_raw[c].astype(str).apply(_norm_txt)
+                        base_raw = base_raw[~s_norm.str.contains(target_norm, na=False)]
+                        base_raw = base_raw[~s_norm.str.contains("02.07.008", na=False)]
+                        break
+        else:
+            base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")]
     else:
         base_raw = g.copy()
         base_raw = base_raw[base_raw["_mes"].isin(meses_nums_drill)].copy()
