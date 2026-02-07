@@ -298,10 +298,6 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     df_receita = read_sheet(excel_path, "RECEITA", sig)
     df_nfs = read_sheet(excel_path, "NOTAS EMITIDAS", sig)
     df_geral = read_sheet(excel_path, "DRE E DFC GERAL", sig)
-    # OBS: No DRE, as linhas "- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)" e
-    # "- DESPESAS COM PESSOAL" passam a puxar da aba "DRE" (mês à frente),
-    # portanto a aba "IMPOSTOS E FOLHA" não é mais necessária aqui.
-
     missing = [n for n, df in [("RECEITA", df_receita), ("NOTAS EMITIDAS", df_nfs),
                                ("DRE E DFC GERAL", df_geral)] if df is None]
     if missing:
@@ -318,55 +314,38 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         return
     compras_by_month = agg_by_month_from_ano_mes(df_nfs, "NFS EMITIDAS", "ANO", "MÊS", ano_ref)
 
-    # (DRE) Não usa mais a aba "IMPOSTOS E FOLHA" para Deduções/Pessoal.
-    # Mantido o restante da estrutura do dashboard.
 
-# ===== DRE: Deduções e Pessoal =====
-    # Agora puxamos essas duas linhas da aba DRE (não mais de IMPOSTOS E FOLHA),
-    # usando sempre o mês "à frente":
-    #   - Se Janeiro, busca Fevereiro
-    #   - Se Fevereiro, busca Março
-    #   - ... (sempre +1 mês)
-    #   - Se não existir o mês seguinte, retorna 0
-    d_dre = prep_dre_sheet_year(excel_path, ano_ref, sig)
-    if d_dre is None:
-        # Se a aba DRE não existir, mantém zerado (sem quebrar a estrutura)
-        deducoes_by_month = {m: 0.0 for m in range(1, 13)}
-        pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
-    else:
-        # normaliza para encontrar a conta de resultado
-        col_cr = "CONTA DE RESULTADO" if "CONTA DE RESULTADO" in d_dre.columns else None
+# ===== DRE: Deduções e Pessoal (mês +1) =====
+# OBS: Essas duas linhas passam a puxar da aba "DRE E DFC GERAL" (CONTA DE RESULTADO),
+# sempre usando o mês "à frente" (m+1). Se não houver mês seguinte, retorna 0.
 
-        if col_cr is None:
-            deducoes_by_month = {m: 0.0 for m in range(1, 13)}
-            pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
-        else:
-            ded_mask = d_dre[col_cr].astype(str).str.strip().str.startswith("00004 -")
-            pes_mask = d_dre[col_cr].astype(str).str.strip().str.startswith("00006 -")
+# Base: contas 00004 (Deduções) e 00006 (Pessoal) da própria DRE E DFC GERAL
+col_cr = "CONTA DE RESULTADO" if "CONTA DE RESULTADO" in g.columns else None
+if col_cr is None:
+    deducoes_by_month = {m: 0.0 for m in range(1, 13)}
+    pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
+else:
+    ded_mask = g[col_cr].astype(str).str.strip().str.startswith("00004 -")
+    pes_mask = g[col_cr].astype(str).str.strip().str.startswith("00006 -")
 
-            # Base mês origem (sem shift)
-            d_ded = d_dre[ded_mask].copy()
-            # Exclusão ICMS-ST (apenas na composição do DRE em Deduções)
-            for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
-                if c in d_ded.columns:
-                    d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains(_norm_txt(_DED_EXCL_DRE), na=False)]
-                    # também exclui só pelo código, caso o texto venha diferente
-                    d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains("02.07.008", na=False)]
-                    break
+    d_ded = g[ded_mask].copy()
 
-            src_ded = d_ded.groupby("_mes")["_v"].sum()
-            src_pes = d_dre[pes_mask].groupby("_mes")["_v"].sum()
+    # Exclusão ICMS-ST (apenas na composição do DRE em Deduções)
+    for c in ["3 - DESPESAS", "DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+        if c in d_ded.columns:
+            d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains(_norm_txt(_DED_EXCL_DRE), na=False)]
+            d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains("02.07.008", na=False)]
+            break
 
-            # Shift: exibe m usando dados de m+1
-            deducoes_by_month = {m: float(src_ded.get(m + 1, 0.0)) for m in range(1, 13)}
-            pessoal_by_month  = {m: float(src_pes.get(m + 1, 0.0)) for m in range(1, 13)}
+    src_ded = d_ded.groupby("_mes")["_v"].sum()
+    src_pes = g[pes_mask].groupby("_mes")["_v"].sum()
+
+    # Shift: exibe mês m usando dados do mês m+1
+    deducoes_by_month = {m: float(src_ded.get(m + 1, 0.0)) for m in range(1, 13)}
+    pessoal_by_month  = {m: float(src_pes.get(m + 1, 0.0)) for m in range(1, 13)}
 
 
-    # Geral por prefixos
-    g = prep_geral_year(excel_path, ano_ref, sig)
-    if g is None:
-        st.error("Não encontrei a aba DRE E DFC GERAL.")
-        return
+# Geral por prefixos
 
     def sum_by_prefix(prefix: str):
         mask = g["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)
@@ -697,11 +676,6 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     req_g = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
     if not req_g.issubset(set(df_geral.columns)):
         st.error("Na aba DRE E DFC GERAL preciso das colunas: 'CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'.")
-        return
-
-    g = prep_geral_year(excel_path, ano_ref, sig)
-    if g is None:
-        st.error("Não encontrei a aba DRE E DFC GERAL.")
         return
 
     pmap = dfc_prefix_map()
