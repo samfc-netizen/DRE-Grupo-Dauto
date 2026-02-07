@@ -298,10 +298,12 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     df_receita = read_sheet(excel_path, "RECEITA", sig)
     df_nfs = read_sheet(excel_path, "NOTAS EMITIDAS", sig)
     df_geral = read_sheet(excel_path, "DRE E DFC GERAL", sig)
-    df_if = read_sheet(excel_path, "IMPOSTOS E FOLHA", sig)
+    # OBS: No DRE, as linhas "- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)" e
+    # "- DESPESAS COM PESSOAL" passam a puxar da aba "DRE" (mês à frente),
+    # portanto a aba "IMPOSTOS E FOLHA" não é mais necessária aqui.
 
     missing = [n for n, df in [("RECEITA", df_receita), ("NOTAS EMITIDAS", df_nfs),
-                               ("IMPOSTOS E FOLHA", df_if), ("DRE E DFC GERAL", df_geral)] if df is None]
+                               ("DRE E DFC GERAL", df_geral)] if df is None]
     if missing:
         st.error(f"Faltam abas no Excel: {', '.join(missing)}")
         return
@@ -316,18 +318,10 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         return
     compras_by_month = agg_by_month_from_ano_mes(df_nfs, "NFS EMITIDAS", "ANO", "MÊS", ano_ref)
 
-    # IMPOSTOS E FOLHA (para DRE mantém shift +1 mês)
-    req_if = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
-    if not req_if.issubset(set(df_if.columns)):
-        st.error("Na aba IMPOSTOS E FOLHA preciso das colunas: 'CONTA DE RESULTADO', 'DTA.PAG', 'VAL.PAG'.")
-        return
-    i = prep_impostos_folha_dre(excel_path, ano_ref, sig)
-    if i is None:
-        st.error("Não encontrei a aba IMPOSTOS E FOLHA.")
-        return
+    # (DRE) Não usa mais a aba "IMPOSTOS E FOLHA" para Deduções/Pessoal.
+    # Mantido o restante da estrutura do dashboard.
 
-    
-    # ===== DRE: Deduções e Pessoal =====
+# ===== DRE: Deduções e Pessoal =====
     # Agora puxamos essas duas linhas da aba DRE (não mais de IMPOSTOS E FOLHA),
     # usando sempre o mês "à frente":
     #   - Se Janeiro, busca Fevereiro
