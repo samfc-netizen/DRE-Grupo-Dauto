@@ -1,6 +1,5 @@
 # GERAL.py
 import re
-import unicodedata
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -11,23 +10,6 @@ MESES_PT = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT"
 MES_NUM_TO_PT = {1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN",
                  7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ"}
 MES_PT_TO_NUM = {v: k for k, v in MES_NUM_TO_PT.items()}
-
-# Exclusões específicas (apenas DRE)
-_DED_EXCL_DRE = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
-
-def _norm_txt(s: str) -> str:
-    """Normaliza texto para comparação robusta (remove acentos, padroniza hífens/espaços, lowercase)."""
-    if s is None:
-        return ""
-    s = str(s)
-    # padroniza hífens comuns
-    s = s.replace("–", "-").replace("—", "-")
-    # remove acentos
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    # colapsa espaços
-    s = re.sub(r"\s+", " ", s)
-    return s.strip().lower()
 
 
 # =========================
@@ -319,7 +301,11 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     df_if = read_sheet(excel_path, "IMPOSTOS E FOLHA", sig)
 
     missing = [n for n, df in [("RECEITA", df_receita), ("NOTAS EMITIDAS", df_nfs),
-                               ("IMPOSTOS E FOLHA", df_if), ("DRE E DFC GERAL", df_geral)] if df is None]
+                               ("DRE E DFC GERAL", df_geral)] if df is None]
+    # Aba "IMPOSTOS E FOLHA" é opcional para esta página. Se não existir, o DRE funciona normalmente
+    # e o DFC zera apenas as parcelas que dependem dela.
+    if df_if is None:
+        st.warning("Aba IMPOSTOS E FOLHA não encontrada. O DRE será exibido normalmente; no DFC, itens que dependem dessa aba ficarão zerados.")
     if missing:
         st.error(f"Faltam abas no Excel: {', '.join(missing)}")
         return
