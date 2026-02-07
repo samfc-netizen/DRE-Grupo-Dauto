@@ -1,6 +1,5 @@
 # GERAL.py
 import re
-import unicodedata
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -104,6 +103,54 @@ def prep_geral_year(excel_path: str, ano_ref: int, sig):
     g["_v"] = g.get("VAL.PAG").apply(to_num) if "VAL.PAG" in g.columns else 0.0
     g = g[g["_ano"] == int(ano_ref)]
     return g
+@st.cache_data(show_spinner=False)
+def prep_dre_sheet_year(excel_path: str, ano_ref: int, sig):
+    """Carrega e prepara a aba DRE (por ano).
+    Tenta usar DTA.PAG (se existir). Caso contrário, tenta MES/MÊS e ANO.
+    """
+    df = read_sheet(excel_path, "DRE", sig)
+    if df is None:
+        return None
+    d = df.copy()
+
+    # Datas / Mês / Ano
+    if "DTA.PAG" in d.columns:
+        dt = pd.to_datetime(d.get("DTA.PAG"), errors="coerce", dayfirst=True)
+        d["_ano"] = dt.dt.year
+        d["_mes"] = dt.dt.month
+    else:
+        # Aceita variações comuns de colunas
+        col_ano = "ANO" if "ANO" in d.columns else ("Ano" if "Ano" in d.columns else None)
+        col_mes = None
+        for c in ["MÊS", "MES", "MÊS.", "MES.", "MÊS ", "MES "]:
+            if c in d.columns:
+                col_mes = c
+                break
+        if col_ano is None or col_mes is None:
+            # sem base para ano/mês
+            d["_ano"] = pd.NA
+            d["_mes"] = pd.NA
+        else:
+            d["_ano"] = pd.to_numeric(d[col_ano], errors="coerce").astype("Int64")
+            d["_mes"] = pd.to_numeric(d[col_mes], errors="coerce").astype("Int64")
+
+    # Valor
+    if "VAL.PAG" in d.columns:
+        d["_v"] = d["VAL.PAG"].apply(to_num)
+    elif "VALOR" in d.columns:
+        d["_v"] = d["VALOR"].apply(to_num)
+    elif "VAL" in d.columns:
+        d["_v"] = d["VAL"].apply(to_num)
+    else:
+        d["_v"] = 0.0
+
+    # Filtra ano
+    try:
+        d = d[d["_ano"].astype("Int64") == int(ano_ref)]
+    except Exception:
+        d = d.iloc[0:0]
+    return d
+
 
 @st.cache_data(show_spinner=False)
 def prep_impostos_folha_dre(excel_path: str, ano_ref: int, sig):
@@ -279,49 +326,47 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.error("Não encontrei a aba IMPOSTOS E FOLHA.")
         return
 
-    # Exceção solicitada: na DRE, dentro de DEDUÇÕES (IMPOSTOS SOBRE VENDAS),
-    # desconsiderar a despesa '02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA (3 - DESPESAS)' (no DFC permanece igual).
-    _DED_EXCL_CODE = "02.07.008"
-    _DED_EXCL_FULL = "02.07.008-ICMS- SUBSTITUIÇÃO TRIBUTARIA"
+    
+    # ===== DRE: Deduções e Pessoal =====
+    # Agora puxamos essas duas linhas da aba DRE (não mais de IMPOSTOS E FOLHA),
+    # usando sempre o mês "à frente":
+    #   - Se Janeiro, busca Fevereiro
+    #   - Se Fevereiro, busca Março
+    #   - ... (sempre +1 mês)
+    #   - Se não existir o mês seguinte, retorna 0
+    d_dre = prep_dre_sheet_year(excel_path, ano_ref, sig)
+    if d_dre is None:
+        # Se a aba DRE não existir, mantém zerado (sem quebrar a estrutura)
+        deducoes_by_month = {m: 0.0 for m in range(1, 13)}
+        pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
+    else:
+        # normaliza para encontrar a conta de resultado
+        col_cr = "CONTA DE RESULTADO" if "CONTA DE RESULTADO" in d_dre.columns else None
 
-    def _norm_txt(x):
-        s = "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
-        # Normaliza para comparação robusta (remove acentos/diacríticos e padroniza hífens/espaços)
-        s = unicodedata.normalize("NFKD", s)
-        s = "".join(ch for ch in s if not unicodedata.combining(ch))
-        s = s.replace("–", "-").replace("—", "-")
-        s = re.sub(r"\s*[-]+\s*", "-", s)     # remove espaços ao redor de hífens
-        s = re.sub(r"\s+", " ", s).strip().upper()
-        return s
+        if col_cr is None:
+            deducoes_by_month = {m: 0.0 for m in range(1, 13)}
+            pessoal_by_month  = {m: 0.0 for m in range(1, 13)}
+        else:
+            ded_mask = d_dre[col_cr].astype(str).str.strip().str.startswith("00004 -")
+            pes_mask = d_dre[col_cr].astype(str).str.strip().str.startswith("00006 -")
 
-    _EXCL_CODE_N = _norm_txt(_DED_EXCL_CODE)
-    _EXCL_FULL_N = _norm_txt(_DED_EXCL_FULL)
+            # Base mês origem (sem shift)
+            d_ded = d_dre[ded_mask].copy()
+            # Exclusão ICMS-ST (apenas na composição do DRE em Deduções)
+            for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                if c in d_ded.columns:
+                    d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains(_norm_txt(_DED_EXCL_DRE), na=False)]
+                    # também exclui só pelo código, caso o texto venha diferente
+                    d_ded = d_ded[~d_ded[c].astype(str).apply(_norm_txt).str.contains("02.07.008", na=False)]
+                    break
 
-    def _mask_excl_ded(df: pd.DataFrame) -> pd.Series:
-        """Máscara de exclusão (somente para DEDUÇÕES no DRE).
-        Checa em múltiplas colunas porque, dependendo da base, a descrição pode estar em:
-        - DESPESA
-        - CONTA DE RESULTADO
-        - HISTÓRICO
-        """
-        cols = [c for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO"] if c in df.columns]
-        if not cols:
-            return pd.Series(False, index=df.index)
-        msk = pd.Series(False, index=df.index)
-        for c in cols:
-            s = df[c].apply(_norm_txt)
-            # Remove por código (mais robusto) e também por match do texto completo (quando disponível)
-            msk |= s.str.contains(_EXCL_CODE_N, na=False) | (s == _EXCL_FULL_N)
-        return msk
+            src_ded = d_ded.groupby("_mes")["_v"].sum()
+            src_pes = d_dre[pes_mask].groupby("_mes")["_v"].sum()
 
+            # Shift: exibe m usando dados de m+1
+            deducoes_by_month = {m: float(src_ded.get(m + 1, 0.0)) for m in range(1, 13)}
+            pessoal_by_month  = {m: float(src_pes.get(m + 1, 0.0)) for m in range(1, 13)}
 
-
-    ded_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")
-    pes_mask = i["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")
-    i_ded = i[ded_mask].copy()
-    i_ded = i_ded[~_mask_excl_ded(i_ded)]
-    deducoes_by_month = {m: float(i_ded.groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
-    pessoal_by_month = {m: float(i[pes_mask].groupby("_mes_ref")["_v"].sum().get(m, 0.0)) for m in range(1, 13)}
 
     # Geral por prefixos
     g = prep_geral_year(excel_path, ano_ref, sig)
@@ -506,14 +551,29 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.info("Compras vêm da aba NOTAS EMITIDAS (NFS EMITIDAS). Drill de despesas/histórico de compras depende de detalhamento por fornecedor/nota.")
         return
 
-    if grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
-        base_raw = i.copy()
-        base_raw = base_raw[base_raw["_mes_ref"].isin(meses_nums_drill)].copy()
-        if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
-            base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")]
-            base_raw = base_raw[~_mask_excl_ded(base_raw)]
-        else:
-            base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")]
+        if grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
+            # Drill dessas duas contas agora vem da aba DRE (com mês à frente).
+            d_dre_drill = prep_dre_sheet_year(excel_path, ano_ref, sig)
+            if d_dre_drill is None:
+                base_raw = pd.DataFrame()
+            else:
+                # meses selecionados no drill são os meses "exibidos" -> buscamos o mês seguinte na base
+                meses_src = [m + 1 for m in meses_nums_drill if m is not None and int(m) < 12]
+                base_raw = d_dre_drill[d_dre_drill["_mes"].isin(meses_src)].copy()
+
+                if "CONTA DE RESULTADO" in base_raw.columns:
+                    if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
+                        base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00004 -")]
+                        # Excluir ICMS-ST na composição do DRE
+                        for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                            if c in base_raw.columns:
+                                base_raw = base_raw[~base_raw[c].astype(str).apply(_norm_txt).str.contains(_norm_txt(_DED_EXCL_DRE), na=False)]
+                                base_raw = base_raw[~base_raw[c].astype(str).apply(_norm_txt).str.contains("02.07.008", na=False)]
+                                break
+                    else:
+                        base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith("00006 -")]
+                else:
+                    base_raw = pd.DataFrame()
     else:
         base_raw = g.copy()
         base_raw = base_raw[base_raw["_mes"].isin(meses_nums_drill)].copy()
