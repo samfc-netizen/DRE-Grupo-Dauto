@@ -1123,7 +1123,7 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
         st.error("Não encontrei a aba RECEITA.")
         return
 
-    canais = [
+    canais_base = [
         "OFICINAS DAUTO final",
         "ZEMA",
         "BOX RÁPIDO",
@@ -1131,14 +1131,18 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
         "LOJAS SOCIEDADE",
         "CANAL DIRETO",
         "OUTRAS *negociações",
-        "ABASTECIMENTO LOJAS DAUTO TINTAS",
-        "FATURAMENTO LOGÍSTICO",
-        "FATURAMENTO ÚNICA",
-        "FATURAMENTO LOJAS DAUTO + SERVIÇO",
-        "RECEITA GRUPO",
     ]
+    col_abastecimento = "ABASTECIMENTO LOJAS DAUTO TINTAS"
+    col_fat_unica = "FATURAMENTO ÚNICA"
+    col_fat_dauto_serv = "FATURAMENTO LOJAS DAUTO + SERVIÇO"
+    col_receita_grupo = "RECEITA GRUPO"
+    col_fat_logistico = "FATURAMENTO LOGÍSTICO"
 
-    req = ["MÊS", "ANO", *canais]
+    req = [
+        "MÊS", "ANO", *canais_base,
+        col_abastecimento, col_fat_unica, col_fat_dauto_serv,
+        col_receita_grupo, col_fat_logistico,
+    ]
     missing = [c for c in req if c not in df_receita.columns]
     if missing:
         st.error("Na aba RECEITA faltam as colunas: " + ", ".join(missing))
@@ -1149,7 +1153,8 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
     base["_mes"] = base["MÊS"].apply(parse_mes)
     base = base[(base["_ano"] == int(ano_ref)) & (base["_mes"].isin(meses_nums))].copy()
 
-    for c in canais:
+    cols_numericas = [*canais_base, col_abastecimento, col_fat_unica, col_fat_dauto_serv, col_receita_grupo, col_fat_logistico]
+    for c in cols_numericas:
         base[c] = base[c].apply(to_num)
 
     base = base.sort_values("_mes")
@@ -1157,34 +1162,100 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
         st.info("Não há dados de faturamento para os filtros selecionados.")
         return
 
-    tabela = base[["MÊS", *canais]].copy().rename(columns={"MÊS": "Mês"})
+    # Regras novas da página:
+    # - FATURAMENTO ÚNICA = soma dos canais-base
+    # - RECEITA GRUPO = FATURAMENTO ÚNICA + FATURAMENTO LOJAS DAUTO + SERVIÇO
+    # - FATURAMENTO LOGÍSTICO = FATURAMENTO ÚNICA + ABASTECIMENTO LOJAS DAUTO TINTAS
+    base[col_fat_unica] = base[canais_base].sum(axis=1)
+    base[col_receita_grupo] = base[col_fat_unica] + base[col_fat_dauto_serv]
+    base[col_fat_logistico] = base[col_fat_unica] + base[col_abastecimento]
 
+    canais_tabela_principal = [
+        *canais_base,
+        col_fat_unica,
+        col_fat_dauto_serv,
+        col_receita_grupo,
+    ]
+
+    tabela_principal = base[["MÊS", *canais_tabela_principal]].copy().rename(columns={"MÊS": "Mês"})
     st.subheader("Faturamento mensal por canal")
-    render_sticky_table(tabela, value_cols=canais)
+    render_sticky_table(tabela_principal, value_cols=canais_tabela_principal)
 
-    totais = tabela[canais].sum(axis=0).reset_index()
-    totais.columns = ["Canal", "Acumulado"]
-    totais = totais.sort_values("Acumulado", ascending=False).reset_index(drop=True)
-    total_grupo = float(totais.loc[totais["Canal"] == "RECEITA GRUPO", "Acumulado"].sum())
-    totais["% Receita Grupo"] = totais["Acumulado"].apply(lambda x: (x / total_grupo * 100.0) if total_grupo != 0 else 0.0)
+    totais_principal = tabela_principal[canais_tabela_principal].sum(axis=0).reset_index()
+    totais_principal.columns = ["Canal", "Acumulado"]
+    total_receita_grupo = float(totais_principal.loc[totais_principal["Canal"] == col_receita_grupo, "Acumulado"].sum())
+    totais_principal["% Receita Grupo"] = totais_principal["Acumulado"].apply(
+        lambda x: (x / total_receita_grupo * 100.0) if total_receita_grupo != 0 else 0.0
+    )
+    totais_principal = totais_principal.sort_values("Acumulado", ascending=False).reset_index(drop=True)
 
     st.markdown("### Acumulado por canal no período selecionado")
-    render_sticky_table(totais, value_cols=["Acumulado"], pct_cols=["% Receita Grupo"], highlight_row_label="RECEITA GRUPO")
+    render_sticky_table(
+        totais_principal,
+        value_cols=["Acumulado"],
+        pct_cols=["% Receita Grupo"],
+        highlight_row_label=col_receita_grupo,
+    )
+
+    st.markdown("### Base logística")
+    tabela_logistica = base[["MÊS", col_abastecimento, col_fat_logistico]].copy().rename(columns={"MÊS": "Mês"})
+    render_sticky_table(tabela_logistica, value_cols=[col_abastecimento, col_fat_logistico])
+
+    st.markdown("### Drill do faturamento logístico")
+    total_logistico = float(base[col_fat_logistico].sum())
+    linhas_drill = []
+    for canal in canais_base:
+        valor = float(base[canal].sum())
+        linhas_drill.append({
+            "Canal": canal,
+            "Acumulado": valor,
+            "% Faturamento Logístico": (valor / total_logistico * 100.0) if total_logistico != 0 else 0.0,
+        })
+
+    valor_fat_unica = float(base[col_fat_unica].sum())
+    linhas_drill.append({
+        "Canal": col_fat_unica,
+        "Acumulado": valor_fat_unica,
+        "% Faturamento Logístico": (valor_fat_unica / total_logistico * 100.0) if total_logistico != 0 else 0.0,
+    })
+
+    valor_abastecimento = float(base[col_abastecimento].sum())
+    linhas_drill.append({
+        "Canal": col_abastecimento,
+        "Acumulado": valor_abastecimento,
+        "% Faturamento Logístico": (valor_abastecimento / total_logistico * 100.0) if total_logistico != 0 else 0.0,
+    })
+
+    linhas_drill.append({
+        "Canal": col_fat_logistico,
+        "Acumulado": total_logistico,
+        "% Faturamento Logístico": 100.0 if total_logistico != 0 else 0.0,
+    })
+
+    drill_logistico = pd.DataFrame(linhas_drill)
+    render_sticky_table(
+        drill_logistico,
+        value_cols=["Acumulado"],
+        pct_cols=["% Faturamento Logístico"],
+        highlight_row_label=col_fat_logistico,
+    )
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Receita Grupo acumulada", fmt_brl_display(total_grupo))
-    c2.metric("Média mensal Receita Grupo", fmt_brl_display(total_grupo / max(len(base), 1)))
-    principal = totais.iloc[0] if not totais.empty else None
-    if principal is not None:
-        c3.metric("Maior canal no período", principal["Canal"], fmt_brl_display(principal["Acumulado"]))
+    c1.metric("Receita Grupo acumulada", fmt_brl_display(total_receita_grupo))
+    c2.metric("Faturamento Logístico acumulado", fmt_brl_display(total_logistico))
+    c3.metric("Média mensal Receita Grupo", fmt_brl_display(total_receita_grupo / max(len(base), 1)))
 
     st.markdown("### Evolução mensal")
-    canal_sel = st.selectbox("Canal", options=canais, index=canais.index("RECEITA GRUPO"), key="fat_canal")
+    canal_sel = st.selectbox(
+        "Canal",
+        options=[*canais_tabela_principal, col_abastecimento, col_fat_logistico],
+        index=[*canais_tabela_principal, col_abastecimento, col_fat_logistico].index(col_receita_grupo),
+        key="fat_canal",
+    )
     evo = base[["MÊS", "_mes", canal_sel]].copy().sort_values("_mes")
     fig = px.bar(evo, x="MÊS", y=canal_sel, title=f"Evolução mensal — {canal_sel}")
     fig.update_layout(xaxis_title="Mês", yaxis_title="Valor (R$)")
     st.plotly_chart(fig, use_container_width=True)
-
 
 # =========================
 # Main: lê Excel 1x e usa nas páginas
