@@ -69,6 +69,117 @@ def fmt_pct(x) -> str:
         return "0,00%"
 
 
+def fmt_brl_display(x) -> str:
+    return f"R$ {format_brl(x)}"
+
+
+def inject_sticky_table_css():
+    st.markdown(
+        """
+        <style>
+        .sticky-table-wrap {
+            overflow-x: auto;
+            border: 1px solid rgba(49, 51, 63, 0.2);
+            border-radius: 8px;
+            background: white;
+            margin-bottom: 0.5rem;
+        }
+        .sticky-table {
+            border-collapse: separate;
+            border-spacing: 0;
+            min-width: 100%;
+            font-size: 0.92rem;
+        }
+        .sticky-table th, .sticky-table td {
+            padding: 8px 10px;
+            border-bottom: 1px solid rgba(49, 51, 63, 0.12);
+            white-space: nowrap;
+            text-align: right;
+        }
+        .sticky-table th {
+            position: sticky;
+            top: 0;
+            z-index: 3;
+            background: #f6f8fb;
+            font-weight: 700;
+        }
+        .sticky-table th:first-child, .sticky-table td:first-child {
+            position: sticky;
+            left: 0;
+            z-index: 2;
+            text-align: left;
+            background: white;
+            min-width: 260px;
+            max-width: 260px;
+            white-space: normal;
+        }
+        .sticky-table th:first-child {
+            z-index: 4;
+            background: #f6f8fb;
+        }
+        .sticky-table tr:hover td {
+            background: #fafafa;
+        }
+        .sticky-table tr:hover td:first-child {
+            background: #f0f3f9;
+        }
+        .sticky-table .row-strong td:first-child {
+            font-weight: 800;
+        }
+        .sticky-table .pos-strong {
+            color: #1f4e79;
+            font-weight: 800;
+        }
+        .sticky-table .neg-strong {
+            color: #c00000;
+            font-weight: 800;
+        }
+        .sticky-table .text-left { text-align: left; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sticky_table(df: pd.DataFrame, value_cols=None, pct_cols=None, highlight_row_label=None):
+    value_cols = set(value_cols or [])
+    pct_cols = set(pct_cols or [])
+    inject_sticky_table_css()
+
+    cols = list(df.columns)
+    html = ['<div class="sticky-table-wrap"><table class="sticky-table"><thead><tr>']
+    for c in cols:
+        cls = 'text-left' if c == cols[0] else ''
+        html.append(f'<th class="{cls}">{c}</th>')
+    html.append('</tr></thead><tbody>')
+
+    for _, row in df.iterrows():
+        is_highlight = str(row.iloc[0]) == str(highlight_row_label) if highlight_row_label is not None else False
+        tr_cls = 'row-strong' if is_highlight else ''
+        html.append(f'<tr class="{tr_cls}">')
+        for j, c in enumerate(cols):
+            val = row[c]
+            classes = []
+            if j == 0:
+                classes.append('text-left')
+            if c in value_cols:
+                num = to_num(val)
+                display = fmt_brl_display(num)
+                if is_highlight:
+                    classes.append('neg-strong' if num < 0 else 'pos-strong')
+            elif c in pct_cols:
+                num = to_num(val)
+                display = fmt_pct(num)
+                if is_highlight:
+                    classes.append('neg-strong' if num < 0 else 'pos-strong')
+            else:
+                display = '' if pd.isna(val) else str(val)
+            html.append(f'<td class="{" ".join(classes)}">{display}</td>')
+        html.append('</tr>')
+    html.append('</tbody></table></div>')
+    st.markdown(''.join(html), unsafe_allow_html=True)
+
+
 def parse_mes(v):
     """Aceita 1..12, '01', 'JAN', 'Janeiro' e devolve mes_num."""
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -487,8 +598,9 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     fmt_map["%ACUMULADO"] = lambda x: fmt_pct(x)
     fmt_map["%ACUMULADO"] = lambda x: fmt_pct(x)
 
-    st.dataframe(dre.style.format(fmt_map).apply(style_resultado, axis=1).hide(axis="index"),
-                 use_container_width=True)
+    value_cols_dre = list(meses_pt) + ["ACUMULADO"]
+    pct_cols_dre = [f"%{m}" for m in meses_pt] + ["%ACUMULADO"]
+    render_sticky_table(dre, value_cols=value_cols_dre, pct_cols=pct_cols_dre, highlight_row_label="RESULTADO OPERACIONAL")
 
     # Indicadores por Linha (Soma e Média) — respeita Ano/Meses do filtro lateral
     st.markdown("### Indicadores por linha (Soma e Média)")
@@ -816,8 +928,9 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     fmt_map["ACUMULADO"] = lambda x: f"R$ {format_brl(x)}"
     fmt_map["%ACUMULADO"] = lambda x: fmt_pct(x)
 
-    st.dataframe(dfc.style.format(fmt_map).apply(style_saldo, axis=1).hide(axis="index"),
-                 use_container_width=True)
+    value_cols_dfc = list(meses_pt) + ["ACUMULADO"]
+    pct_cols_dfc = [f"%{m}" for m in meses_pt] + ["%ACUMULADO"]
+    render_sticky_table(dfc, value_cols=value_cols_dfc, pct_cols=pct_cols_dfc, highlight_row_label="SALDO OPERACIONAL")
 
     # Indicadores por Linha (Soma e Média) — respeita Ano/Meses do filtro lateral
     st.markdown("### Indicadores por linha (Soma e Média)")
@@ -996,6 +1109,84 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
 
 
 # =========================
+# Página 3: Faturamento
+# =========================
+def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
+    st.title("Faturamento por canal")
+
+    meses_pt = (meses_pt_sel or [])
+    meses_pt = meses_pt if len(meses_pt) > 0 else MESES_PT
+    meses_nums = [MES_PT_TO_NUM[m] for m in meses_pt]
+
+    df_receita = read_sheet(excel_path, "RECEITA", sig)
+    if df_receita is None:
+        st.error("Não encontrei a aba RECEITA.")
+        return
+
+    canais = [
+        "OFICINAS DAUTO final",
+        "ZEMA",
+        "BOX RÁPIDO",
+        "SAGA",
+        "LOJAS SOCIEDADE",
+        "CANAL DIRETO",
+        "OUTRAS *negociações",
+        "ABASTECIMENTO LOJAS DAUTO TINTAS",
+        "FATURAMENTO LOGÍSTICO",
+        "FATURAMENTO ÚNICA",
+        "FATURAMENTO LOJAS DAUTO + SERVIÇO",
+        "RECEITA GRUPO",
+    ]
+
+    req = ["MÊS", "ANO", *canais]
+    missing = [c for c in req if c not in df_receita.columns]
+    if missing:
+        st.error("Na aba RECEITA faltam as colunas: " + ", ".join(missing))
+        return
+
+    base = df_receita.copy()
+    base["_ano"] = pd.to_numeric(base["ANO"], errors="coerce").astype("Int64")
+    base["_mes"] = base["MÊS"].apply(parse_mes)
+    base = base[(base["_ano"] == int(ano_ref)) & (base["_mes"].isin(meses_nums))].copy()
+
+    for c in canais:
+        base[c] = base[c].apply(to_num)
+
+    base = base.sort_values("_mes")
+    if base.empty:
+        st.info("Não há dados de faturamento para os filtros selecionados.")
+        return
+
+    tabela = base[["MÊS", *canais]].copy().rename(columns={"MÊS": "Mês"})
+
+    st.subheader("Faturamento mensal por canal")
+    render_sticky_table(tabela, value_cols=canais)
+
+    totais = tabela[canais].sum(axis=0).reset_index()
+    totais.columns = ["Canal", "Acumulado"]
+    totais = totais.sort_values("Acumulado", ascending=False).reset_index(drop=True)
+    total_grupo = float(totais.loc[totais["Canal"] == "RECEITA GRUPO", "Acumulado"].sum())
+    totais["% Receita Grupo"] = totais["Acumulado"].apply(lambda x: (x / total_grupo * 100.0) if total_grupo != 0 else 0.0)
+
+    st.markdown("### Acumulado por canal no período selecionado")
+    render_sticky_table(totais, value_cols=["Acumulado"], pct_cols=["% Receita Grupo"], highlight_row_label="RECEITA GRUPO")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Receita Grupo acumulada", fmt_brl_display(total_grupo))
+    c2.metric("Média mensal Receita Grupo", fmt_brl_display(total_grupo / max(len(base), 1)))
+    principal = totais.iloc[0] if not totais.empty else None
+    if principal is not None:
+        c3.metric("Maior canal no período", principal["Canal"], fmt_brl_display(principal["Acumulado"]))
+
+    st.markdown("### Evolução mensal")
+    canal_sel = st.selectbox("Canal", options=canais, index=canais.index("RECEITA GRUPO"), key="fat_canal")
+    evo = base[["MÊS", "_mes", canal_sel]].copy().sort_values("_mes")
+    fig = px.bar(evo, x="MÊS", y=canal_sel, title=f"Evolução mensal — {canal_sel}")
+    fig.update_layout(xaxis_title="Mês", yaxis_title="Valor (R$)")
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# =========================
 # Main: lê Excel 1x e usa nas páginas
 # =========================
 st.set_page_config(page_title="GERAL", layout="wide")
@@ -1069,9 +1260,11 @@ if not anos:
 
 ano_ref = st.sidebar.selectbox("Ano de referência", options=anos, index=len(anos) - 1)
 
-pagina = st.sidebar.radio("Selecione:", ["DRE Geral", "DFC Geral"])
+pagina = st.sidebar.radio("Selecione:", ["DRE Geral", "DFC Geral", "Faturamento"])
 
 if pagina == "DRE Geral":
     pagina_dre_geral(excel_path, ano_ref, meses_pt_sel)
-else:
+elif pagina == "DFC Geral":
     pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel)
+else:
+    pagina_faturamento(excel_path, ano_ref, meses_pt_sel)
