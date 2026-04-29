@@ -398,6 +398,24 @@ def sum_by_prefix_prepped(g: pd.DataFrame, prefix: str):
     return {m: float(grp.get(m, 0.0)) for m in range(1, 13)}
 
 
+def _mask_outras_receitas(df: pd.DataFrame) -> pd.Series:
+    """Identifica Outras Receitas na aba DRE E DFC GERAL / CONTA DE RESULTADO."""
+    conta = df.get("CONTA DE RESULTADO", pd.Series([""] * len(df), index=df.index)).astype(str)
+    conta_norm = conta.apply(_norm_txt)
+    mask = conta.str.strip().str.startswith("00003 -", na=False)
+    mask = mask | conta_norm.str.contains("outras receitas", na=False)
+    return mask
+
+
+def sum_outras_receitas_prepped(g: pd.DataFrame):
+    """Soma Outras Receitas por mês usando dataframe já preparado (com _mes e _v)."""
+    if g is None or g.empty:
+        return {m: 0.0 for m in range(1, 13)}
+    mask = _mask_outras_receitas(g)
+    grp = g[mask].groupby("_mes")["_v"].sum()
+    return {m: float(grp.get(m, 0.0)) for m in range(1, 13)}
+
+
 def dfc_prefix_map():
     """
     Plano de contas do DFC (conforme você informou):
@@ -523,12 +541,14 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     inv_by_month = sum_by_prefix("00015 -")
     op_by_month = sum_by_prefix("00017 -")
     ret_by_month = sum_by_prefix("00016 -")
+    outras_receitas_by_month = sum_outras_receitas_prepped(g)
+    receita_total_by_month = {m: float(receita_by_month.get(m, 0.0)) + float(outras_receitas_by_month.get(m, 0.0)) for m in range(1, 13)}
 
     resultado_by_month = {}
     for m in range(1, 13):
         outros = (compras_by_month[m] + deducoes_by_month[m] + pessoal_by_month[m] +
                   adm_by_month[m] + com_by_month[m] + fin_by_month[m] + inv_by_month[m] + op_by_month[m] + ret_by_month[m])
-        resultado_by_month[m] = receita_by_month[m] - outros
+        resultado_by_month[m] = receita_total_by_month[m] - outros
 
 
     # Resultado antes das retiradas e despesas financeiras (volta essas duas linhas no resultado)
@@ -536,6 +556,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
 
     linhas = [
         ("+ RECEITA", receita_by_month),
+        ("+ OUTRAS RECEITAS", outras_receitas_by_month),
         ("- COMPRAS EMISSÃO", compras_by_month),
         ("- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", deducoes_by_month),
         ("- DESPESAS COM PESSOAL", pessoal_by_month),
@@ -554,7 +575,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         row = {"Linha": nome}
         for m in meses_nums:
             v = float(by_month.get(m, 0.0))
-            rec = float(receita_by_month.get(m, 0.0))
+            rec = float(receita_total_by_month.get(m, 0.0))
             pct = (v / rec * 100.0) if rec != 0 else 0.0
             mes_pt = MES_NUM_TO_PT[m]
             row[mes_pt] = v
@@ -568,7 +589,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         dre["ACUMULADO"] = 0.0
 
     # % Acumulado sobre Receita (no período selecionado)
-    receita_acum = float(sum(receita_by_month.get(m, 0.0) for m in meses_nums))
+    receita_acum = float(sum(receita_total_by_month.get(m, 0.0) for m in meses_nums))
     dre["%ACUMULADO"] = (dre["ACUMULADO"] / receita_acum * 100.0) if receita_acum != 0 else 0.0
 
 
@@ -622,6 +643,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     st.subheader("Drill (DRE): Contas → Despesas (sintetizadas) + Histórico")
 
     grupos = [
+        "OUTRAS RECEITAS",
         "COMPRAS EMISSÃO",
         "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)",
         "DESPESAS COM PESSOAL",
@@ -641,12 +663,13 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         mes_sel = st.selectbox("Mês", options=mes_opt, index=0, key="dre_mes")
 
     meses_nums_drill = meses_nums if mes_sel == 'TODOS' else [MES_PT_TO_NUM[mes_sel]]
-    receita_mes = float(sum(float(receita_by_month.get(m, 0.0)) for m in meses_nums_drill))
+    receita_mes = float(sum(float(receita_total_by_month.get(m, 0.0)) for m in meses_nums_drill))
 
     def _sum_months(by_month):
         return float(sum(float(by_month.get(m, 0.0)) for m in meses_nums_drill))
 
     contas_mes = {
+        "Outras Receitas": _sum_months(outras_receitas_by_month),
         "Compras": _sum_months(compras_by_month),
         "Deduções": _sum_months(deducoes_by_month),
         "Pessoal": _sum_months(pessoal_by_month),
@@ -672,6 +695,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
             st.info("Sem valores no mês selecionado para o gráfico.")
     with pc2:
         val_grupo_mes_map = {
+            "OUTRAS RECEITAS": _sum_months(outras_receitas_by_month),
             "COMPRAS EMISSÃO": _sum_months(compras_by_month),
             "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)": _sum_months(deducoes_by_month),
             "DESPESAS COM PESSOAL": _sum_months(pessoal_by_month),
@@ -690,7 +714,11 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.info("Compras vêm da aba NOTAS EMITIDAS (NFS EMITIDAS). Drill de despesas/histórico de compras depende de detalhamento por fornecedor/nota.")
         return
 
-    if grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
+    if grupo_sel == "OUTRAS RECEITAS":
+        base_raw = g.copy()
+        base_raw = base_raw[base_raw["_mes"].isin(meses_nums_drill)].copy()
+        base_raw = base_raw[_mask_outras_receitas(base_raw)]
+    elif grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
         # Drill dessas duas contas vem da aba DRE E DFC GERAL com mês à frente (m+1).
         meses_src = [m + 1 for m in meses_nums_drill if m is not None and int(m) < 12]
         base_raw = g[g["_mes"].isin(meses_src)].copy()
@@ -855,18 +883,21 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     ret_by_month = sum_by_prefix_prepped(g, '00016 -')
     inv_by_month = sum_by_prefix_prepped(g, pmap["INVESTIMENTOS"])
     op_by_month = sum_by_prefix_prepped(g, pmap["DESPESAS OPERACIONAIS"])
+    outras_receitas_by_month = sum_outras_receitas_prepped(g)
+    receb_total_by_month = {m: float(receb_by_month.get(m, 0.0)) + float(outras_receitas_by_month.get(m, 0.0)) for m in range(1, 13)}
 
     saldo_by_month = {}
     for m in range(1, 13):
         saidas = (fornec_by_month[m] + ded_by_month[m] + pessoal_by_month[m] + adm_by_month[m] +
                   com_by_month[m] + fin_by_month[m] + inv_by_month[m] + op_by_month[m] + ret_by_month[m])
-        saldo_by_month[m] = receb_by_month[m] - saidas
+        saldo_by_month[m] = receb_total_by_month[m] - saidas
 
     # Resultado antes das retiradas e despesas financeiras (volta essas duas linhas no resultado)
     resultado_antes_by_month = {m: float(saldo_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) + float(ret_by_month.get(m, 0.0)) for m in range(1, 13)}
 
     linhas = [
         ("+ RECEBIMENTOS", receb_by_month),
+        ("+ OUTRAS RECEITAS", outras_receitas_by_month),
         ("- FORNECEDORES", fornec_by_month),
         ("- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", ded_by_month),
         ("- DESPESAS COM PESSOAL", pessoal_by_month),
@@ -885,7 +916,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         row = {"Linha": nome}
         for m in meses_nums:
             v = float(by_month.get(m, 0.0))
-            rec = float(receb_by_month.get(m, 0.0))
+            rec = float(receb_total_by_month.get(m, 0.0))
             pct = (v / rec * 100.0) if rec != 0 else 0.0
             mes_pt = MES_NUM_TO_PT[m]
             row[mes_pt] = v
@@ -900,7 +931,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         dfc["ACUMULADO"] = 0.0
 
     # % Acumulado sobre Recebimentos (no período selecionado)
-    receb_acum = float(sum(receb_by_month.get(m, 0.0) for m in meses_nums))
+    receb_acum = float(sum(receb_total_by_month.get(m, 0.0) for m in meses_nums))
     dfc["%ACUMULADO"] = (dfc["ACUMULADO"] / receb_acum * 100.0) if receb_acum != 0 else 0.0
 
     st.subheader("DFC (JAN–DEZ) — Valores em R$ e % sobre Recebimentos")
@@ -952,6 +983,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     st.subheader("Drill (DFC): Contas → Despesas (sintetizadas) + Histórico")
 
     grupos = [
+        "OUTRAS RECEITAS",
         "FORNECEDORES",
         "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)",
         "DESPESAS COM PESSOAL",
@@ -971,12 +1003,13 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         mes_sel = st.selectbox("Mês", options=mes_opt, index=0, key="dfc_mes")
 
     meses_nums_drill = meses_nums if mes_sel == 'TODOS' else [MES_PT_TO_NUM[mes_sel]]
-    receb_mes = float(sum(float(receb_by_month.get(m, 0.0)) for m in meses_nums_drill))
+    receb_mes = float(sum(float(receb_total_by_month.get(m, 0.0)) for m in meses_nums_drill))
 
     def _sum_months(by_month):
         return float(sum(float(by_month.get(m, 0.0)) for m in meses_nums_drill))
 
     contas_mes = {
+        "Outras Receitas": _sum_months(outras_receitas_by_month),
         "Fornecedores": _sum_months(fornec_by_month),
         "Deduções": _sum_months(ded_by_month),
         "Pessoal": _sum_months(pessoal_by_month),
@@ -1002,6 +1035,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
             st.info("Sem valores no mês selecionado para o gráfico.")
     with pc2:
         val_map = {
+            "OUTRAS RECEITAS": _sum_months(outras_receitas_by_month),
             "FORNECEDORES": _sum_months(fornec_by_month),
             "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)": _sum_months(ded_by_month),
             "DESPESAS COM PESSOAL": _sum_months(pessoal_by_month),
@@ -1019,7 +1053,9 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     prefix = dfc_prefix_map().get(grupo_sel)
     base_raw = g.copy()
     base_raw = base_raw[base_raw["_mes"].isin(meses_nums_drill)].copy()
-    if prefix:
+    if grupo_sel == "OUTRAS RECEITAS":
+        base_raw = base_raw[_mask_outras_receitas(base_raw)]
+    elif prefix:
         base_raw = base_raw[base_raw["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)]
 
     if base_raw.empty:
