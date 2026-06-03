@@ -836,6 +836,8 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
                      use_container_width=True)
 
 
+    render_agente_bi(excel_path, ano_ref, meses_pt_sel, contexto_padrao="DRE")
+
 # =========================
 # Página 2: DFC (FORNECEDORES = 00012)
 # =========================
@@ -1144,6 +1146,8 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
                      use_container_width=True)
 
 
+    render_agente_bi(excel_path, ano_ref, meses_pt_sel, contexto_padrao="DFC")
+
 # =========================
 # Página 3: Faturamento
 # =========================
@@ -1292,6 +1296,365 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
     fig = px.bar(evo, x="MÊS", y=canal_sel, title=f"Evolução mensal — {canal_sel}")
     fig.update_layout(xaxis_title="Mês", yaxis_title="Valor (R$)")
     st.plotly_chart(fig, use_container_width=True)
+
+
+
+# =========================
+# Agente de BI — DRE / DFC
+# =========================
+def _periodo_meses_from_text(pergunta: str, meses_padrao=None):
+    """Extrai meses citados na pergunta. Se encontrar 'de X a Y', devolve intervalo."""
+    meses_padrao = meses_padrao or MESES_PT
+    txt = _norm_txt(pergunta)
+    aliases = {
+        "jan": 1, "janeiro": 1,
+        "fev": 2, "fevereiro": 2,
+        "mar": 3, "marco": 3, "março": 3,
+        "abr": 4, "abril": 4,
+        "mai": 5, "maio": 5,
+        "jun": 6, "junho": 6,
+        "jul": 7, "julho": 7,
+        "ago": 8, "agosto": 8,
+        "set": 9, "setembro": 9,
+        "out": 10, "outubro": 10,
+        "nov": 11, "novembro": 11,
+        "dez": 12, "dezembro": 12,
+    }
+    encontrados = []
+    for nome, num in aliases.items():
+        if re.search(rf"\b{re.escape(nome)}\b", txt):
+            encontrados.append(num)
+    # números soltos 1..12 quando acompanhados de mês/mes
+    nums = re.findall(r"\b(?:mes|mês)\s*(\d{1,2})\b|\b(\d{1,2})\s*(?:mes|mês)\b", txt)
+    for a, b in nums:
+        n = int(a or b)
+        if 1 <= n <= 12:
+            encontrados.append(n)
+    encontrados = sorted(set(encontrados))
+    if len(encontrados) >= 2:
+        ini, fim = encontrados[0], encontrados[-1]
+        if ini <= fim:
+            return list(range(ini, fim + 1))
+    if len(encontrados) == 1:
+        return encontrados
+    return [MES_PT_TO_NUM[m] for m in (meses_padrao if meses_padrao else MESES_PT)]
+
+
+def _detectar_visao_bi(pergunta: str):
+    txt = _norm_txt(pergunta)
+    tem_dre = "dre" in txt or "competencia" in txt or "resultado operacional" in txt
+    tem_dfc = "dfc" in txt or "caixa" in txt or "recebimento" in txt or "saldo operacional" in txt
+    if tem_dre and not tem_dfc:
+        return "DRE"
+    if tem_dfc and not tem_dre:
+        return "DFC"
+    return None
+
+
+def _inferir_intencao_bi(pergunta: str):
+    txt = _norm_txt(pergunta)
+    if any(w in txt for w in ["lucro", "resultado", "saldo operacional", "resultado operacional"]):
+        return "resultado"
+    if any(w in txt for w in ["comparativo", "comparar", "evolucao", "evolução", "mes a mes", "mês a mês"]):
+        return "comparativo"
+    if any(w in txt for w in ["%", "percentual", "por cento", "representa", "participacao", "participação"]):
+        return "percentual"
+    if any(w in txt for w in ["maior despesa", "top despesa", "principais despesas", "ranking"]):
+        return "maior_despesa"
+    if any(w in txt for w in ["receita", "faturamento"]):
+        return "receita"
+    if "recebimento" in txt or "recebimentos" in txt:
+        return "recebimento"
+    if "outras receitas" in txt or "outra receita" in txt:
+        return "outras_receitas"
+    return "diagnostico"
+
+
+def _bi_prefixos_por_visao(visao: str):
+    base = {
+        "OUTRAS RECEITAS": "00003 -",
+        "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)": "00004 -",
+        "DESPESAS COM PESSOAL": "00006 -",
+        "DESPESAS ADMINISTRATIVAS": "00007 -",
+        "DESPESAS COMERCIAIS": "00009 -",
+        "DESPESAS FINANCEIRAS": "00011 -",
+        "RETIRADAS SÓCIOS": "00016 -",
+        "INVESTIMENTOS": "00015 -",
+        "DESPESAS OPERACIONAIS": "00017 -",
+    }
+    if visao == "DFC":
+        base = {"FORNECEDORES": "00012 -", **base}
+    else:
+        base = {"COMPRAS EMISSÃO": None, **base}
+    return base
+
+
+def _match_opcao_texto(pergunta: str, opcoes: list[str]) -> str | None:
+    txt = _norm_txt(pergunta)
+    melhor = None
+    melhor_score = 0
+    for op in opcoes:
+        opn = _norm_txt(op)
+        palavras = [p for p in re.split(r"\W+", opn) if len(p) > 3 and p not in {"despesas", "receitas", "sobre", "vendas"}]
+        score = sum(1 for p in palavras if p in txt)
+        if opn in txt:
+            score += 5
+        if score > melhor_score:
+            melhor, melhor_score = op, score
+    return melhor if melhor_score > 0 else None
+
+
+def _montar_bases_bi(excel_path, ano_ref: int, meses_pt_sel=None):
+    """Monta bases mensais de DRE e DFC para o Agente de BI."""
+    meses_pt = (meses_pt_sel or []) or MESES_PT
+    meses_nums = [MES_PT_TO_NUM[m] for m in meses_pt]
+    g = prep_geral_year(excel_path, ano_ref, sig)
+    g_next = prep_geral_year(excel_path, int(ano_ref) + 1, sig)
+    df_receita = read_sheet(excel_path, "RECEITA", sig)
+    df_nfs = read_sheet(excel_path, "NOTAS EMITIDAS", sig)
+    df_rec = read_sheet(excel_path, "RECEBIMENTO", sig)
+    if g is None:
+        return None
+
+    receita_by_month = agg_by_month_from_ano_mes(df_receita, "RECEITA GRUPO", "ANO", "MÊS", ano_ref) if df_receita is not None else {m: 0.0 for m in range(1,13)}
+    compras_by_month = agg_by_month_from_ano_mes(df_nfs, "NFS EMITIDAS", "ANO", "MÊS", ano_ref) if df_nfs is not None else {m: 0.0 for m in range(1,13)}
+    receb_by_month = agg_by_month_from_ano_mes(df_rec, "RECEBIMENTO", "ANO", "MÊS", ano_ref) if df_rec is not None else {m: 0.0 for m in range(1,13)}
+
+    def sum_prefix(prefix: str, base=None):
+        base = g if base is None else base
+        if base is None or base.empty:
+            return {m: 0.0 for m in range(1, 13)}
+        mask = base["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)
+        grp = base[mask].groupby("_mes")["_v"].sum()
+        return {m: float(grp.get(m, 0.0)) for m in range(1, 13)}
+
+    def sum_shift_dre(prefix: str, exclude_icmsst: bool = False):
+        d = g[g["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)].copy()
+        dn = g_next[g_next["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)].copy() if g_next is not None else pd.DataFrame()
+        if exclude_icmsst:
+            for base in [d, dn]:
+                if base is not None and not base.empty:
+                    target_norm = _norm_txt(_DED_EXCL_DRE)
+                    for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                        if c in base.columns:
+                            s_norm = base[c].astype(str).apply(_norm_txt)
+                            base.drop(base[s_norm.str.contains(target_norm, na=False) | s_norm.str.contains("02.07.008", na=False)].index, inplace=True)
+                            break
+        src = d.groupby("_mes")["_v"].sum() if not d.empty else pd.Series(dtype="float64")
+        src_next = dn.groupby("_mes")["_v"].sum() if dn is not None and not dn.empty else pd.Series(dtype="float64")
+        out = {}
+        for m in range(1, 13):
+            out[m] = float(src.get(m + 1, 0.0)) if m < 12 else float(src_next.get(1, 0.0))
+        return out
+
+    outras_receitas = sum_outras_receitas_prepped(g)
+    receita_total = {m: float(receita_by_month.get(m, 0)) + float(outras_receitas.get(m, 0)) for m in range(1,13)}
+    receb_total = {m: float(receb_by_month.get(m, 0)) + float(outras_receitas.get(m, 0)) for m in range(1,13)}
+
+    dre = {
+        "+ RECEITA": receita_by_month,
+        "+ OUTRAS RECEITAS": outras_receitas,
+        "- COMPRAS EMISSÃO": compras_by_month,
+        "- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)": sum_shift_dre("00004 -", True),
+        "- DESPESAS COM PESSOAL": sum_shift_dre("00006 -", False),
+        "- DESPESAS ADMINISTRATIVAS": sum_prefix("00007 -"),
+        "- DESPESAS COMERCIAIS": sum_prefix("00009 -"),
+        "- DESPESAS FINANCEIRAS": sum_prefix("00011 -"),
+        "- RETIRADAS SÓCIOS": sum_prefix("00016 -"),
+        "- INVESTIMENTOS": sum_prefix("00015 -"),
+        "- DESPESAS OPERACIONAIS": sum_prefix("00017 -"),
+    }
+    resultado_operacional = {}
+    for m in range(1,13):
+        saidas = sum(float(dre[k].get(m,0)) for k in dre if k.startswith("-"))
+        resultado_operacional[m] = float(receita_total.get(m,0)) - saidas
+    dre["RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS"] = {m: resultado_operacional[m] + dre["- DESPESAS FINANCEIRAS"][m] + dre["- RETIRADAS SÓCIOS"][m] for m in range(1,13)}
+    dre["RESULTADO OPERACIONAL"] = resultado_operacional
+
+    pmap = dfc_prefix_map()
+    dfc = {
+        "+ RECEBIMENTOS": receb_by_month,
+        "+ OUTRAS RECEITAS": outras_receitas,
+        "- FORNECEDORES": sum_prefix(pmap["FORNECEDORES"]),
+        "- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)": sum_prefix(pmap["DEDUÇÕES (IMPOSTOS SOBRE VENDAS)"]),
+        "- DESPESAS COM PESSOAL": sum_prefix(pmap["DESPESAS COM PESSOAL"]),
+        "- DESPESAS ADMINISTRATIVAS": sum_prefix(pmap["DESPESAS ADMINISTRATIVAS"]),
+        "- DESPESAS COMERCIAIS": sum_prefix(pmap["DESPESAS COMERCIAIS"]),
+        "- DESPESAS FINANCEIRAS": sum_prefix(pmap["DESPESAS FINANCEIRAS"]),
+        "- RETIRADAS SÓCIOS": sum_prefix("00016 -"),
+        "- INVESTIMENTOS": sum_prefix(pmap["INVESTIMENTOS"]),
+        "- DESPESAS OPERACIONAIS": sum_prefix(pmap["DESPESAS OPERACIONAIS"]),
+    }
+    saldo_operacional = {}
+    for m in range(1,13):
+        saidas = sum(float(dfc[k].get(m,0)) for k in dfc if k.startswith("-"))
+        saldo_operacional[m] = float(receb_total.get(m,0)) - saidas
+    dfc["RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS"] = {m: saldo_operacional[m] + dfc["- DESPESAS FINANCEIRAS"][m] + dfc["- RETIRADAS SÓCIOS"][m] for m in range(1,13)}
+    dfc["SALDO OPERACIONAL"] = saldo_operacional
+
+    return {"DRE": dre, "DFC": dfc, "g": g, "receita_total": receita_total, "receb_total": receb_total, "meses_pt": meses_pt, "meses_nums": meses_nums}
+
+
+def _bi_tabela_mensal(label: str, by_month: dict, denom: dict, meses_nums: list[int], pct_label: str):
+    rows = []
+    for m in meses_nums:
+        valor = float(by_month.get(m, 0.0))
+        base = float(denom.get(m, 0.0))
+        rows.append({"Mês": MES_NUM_TO_PT[m], "Valor": valor, pct_label: (valor / base * 100.0) if base else 0.0})
+    df = pd.DataFrame(rows)
+    total = float(df["Valor"].sum()) if not df.empty else 0.0
+    base_total = float(sum(denom.get(m, 0.0) for m in meses_nums))
+    df.loc[len(df)] = {"Mês": "ACUMULADO", "Valor": total, pct_label: (total / base_total * 100.0) if base_total else 0.0}
+    st.markdown(f"**{label}**")
+    render_sticky_table(df, value_cols=["Valor"], pct_cols=[pct_label], highlight_row_label="ACUMULADO")
+    return total, (total / base_total * 100.0) if base_total else 0.0
+
+
+def _bi_detalhar_despesas(excel_path, ano_ref, visao, grupo, meses_nums, denom_total):
+    g = prep_geral_year(excel_path, ano_ref, sig)
+    if g is None or g.empty:
+        return pd.DataFrame()
+    base = g[g["_mes"].isin(meses_nums)].copy()
+    if grupo == "OUTRAS RECEITAS":
+        base = base[_mask_outras_receitas(base)]
+    else:
+        prefix = _bi_prefixos_por_visao(visao).get(grupo)
+        if prefix:
+            base = base[base["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)]
+    if base.empty:
+        return pd.DataFrame()
+    if "DESPESA" not in base.columns:
+        base["DESPESA"] = "—"
+    base["DESPESA_SINT"] = base["DESPESA"].apply(sintetizar_despesa)
+    det = base.groupby("DESPESA_SINT", dropna=False)["_v"].sum().reset_index().rename(columns={"_v": "Valor", "DESPESA_SINT": "Despesa"})
+    det["% Base"] = det["Valor"].apply(lambda x: (x / denom_total * 100.0) if denom_total else 0.0)
+    return det.sort_values("Valor", ascending=False).reset_index(drop=True)
+
+
+def render_agente_bi(excel_path, ano_ref, meses_pt_sel=None, contexto_padrao="DRE"):
+    st.divider()
+    st.subheader("Agente de BI — Perguntas gerenciais")
+    st.caption("Pergunte sobre lucro, resultado, receita, recebimentos, outras receitas, comparativos por conta, maior despesa e participação percentual.")
+
+    bases = _montar_bases_bi(excel_path, ano_ref, meses_pt_sel)
+    if bases is None:
+        st.info("Não consegui montar a base do Agente de BI com as abas disponíveis.")
+        return
+
+    exemplos = [
+        "Qual foi o lucro no DRE?",
+        "Qual foi o lucro no DFC?",
+        "Faça um comparativo de despesas administrativas de janeiro a maio",
+        "Quanto representa despesas comerciais no DRE?",
+        "Qual foi a maior despesa da conta despesas administrativas?",
+        "Quanto foi outras receitas?",
+        "Qual foi a receita?",
+        "Qual foi o recebimento?",
+    ]
+    with st.expander("Exemplos de perguntas", expanded=False):
+        st.write("\n".join([f"- {e}" for e in exemplos]))
+
+    pergunta = st.text_input("Digite sua pergunta para o Agente de BI", key=f"agente_bi_pergunta_{contexto_padrao}", placeholder="Ex.: Faça um comparativo de despesas administrativas de janeiro a maio")
+    if not pergunta:
+        return
+
+    intencao = _inferir_intencao_bi(pergunta)
+    visao = _detectar_visao_bi(pergunta) or contexto_padrao
+    if _detectar_visao_bi(pergunta) is None and intencao == "resultado":
+        visao = st.radio("Esse lucro/resultado é no DRE ou no DFC?", ["DRE", "DFC"], horizontal=True, key=f"agente_bi_visao_{contexto_padrao}")
+
+    meses_nums = _periodo_meses_from_text(pergunta, meses_pt_sel)
+    meses_nums = [m for m in meses_nums if 1 <= int(m) <= 12]
+    if not meses_nums:
+        meses_nums = bases["meses_nums"]
+    pct_label = "% Receita" if visao == "DRE" else "% Recebimentos"
+    denom = bases["receita_total"] if visao == "DRE" else bases["receb_total"]
+    base_total = float(sum(denom.get(m, 0.0) for m in meses_nums))
+
+    st.markdown(f"**Intenção identificada:** {intencao.replace('_', ' ').title()} | **Visão:** {visao} | **Período:** {', '.join(MES_NUM_TO_PT[m] for m in meses_nums)} / {ano_ref}")
+
+    linhas = bases[visao]
+    opcoes_contas = list(linhas.keys())
+    opcoes_grupos = list(_bi_prefixos_por_visao(visao).keys())
+
+    if intencao == "resultado":
+        if visao == "DFC":
+            total1, pct1 = _bi_tabela_mensal("RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS", linhas["RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS"], denom, meses_nums, pct_label)
+            total2, pct2 = _bi_tabela_mensal("SALDO OPERACIONAL", linhas["SALDO OPERACIONAL"], denom, meses_nums, pct_label)
+            st.success(f"Leitura gerencial: antes das retiradas e despesas financeiras, o caixa gerou {fmt_brl_display(total1)} no período. Após todas as saídas operacionais, o saldo operacional ficou em {fmt_brl_display(total2)} ({fmt_pct(pct2)} da base de recebimentos).")
+        else:
+            total1, pct1 = _bi_tabela_mensal("RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS", linhas["RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS"], denom, meses_nums, pct_label)
+            total2, pct2 = _bi_tabela_mensal("RESULTADO OPERACIONAL", linhas["RESULTADO OPERACIONAL"], denom, meses_nums, pct_label)
+            st.success(f"Leitura gerencial: antes das retiradas e despesas financeiras, o negócio gerou {fmt_brl_display(total1)}. Considerando todas as linhas do DRE, o resultado operacional ficou em {fmt_brl_display(total2)} ({fmt_pct(pct2)} da receita).")
+        return
+
+    if intencao in {"receita", "recebimento", "outras_receitas"}:
+        if intencao == "receita":
+            visao_local, linha = "DRE", "+ RECEITA"
+            denom_local, pct_local = bases["receita_total"], "% Receita"
+        elif intencao == "recebimento":
+            visao_local, linha = "DFC", "+ RECEBIMENTOS"
+            denom_local, pct_local = bases["receb_total"], "% Recebimentos"
+        else:
+            visao_local, linha = visao, "+ OUTRAS RECEITAS"
+            denom_local, pct_local = denom, pct_label
+        _bi_tabela_mensal(linha, bases[visao_local][linha], denom_local, meses_nums, pct_local)
+        return
+
+    conta_detectada = _match_opcao_texto(pergunta, opcoes_contas)
+    grupo_detectado = _match_opcao_texto(pergunta, opcoes_grupos)
+
+    if intencao in {"comparativo", "percentual"}:
+        conta = conta_detectada
+        if conta is None:
+            grupo = grupo_detectado
+            if grupo:
+                conta = next((c for c in opcoes_contas if _norm_txt(grupo) in _norm_txt(c)), None)
+        if conta is None:
+            conta = st.selectbox("Não identifiquei a conta. Selecione a conta para análise:", opcoes_contas, key=f"agente_bi_conta_{contexto_padrao}")
+        total, pct = _bi_tabela_mensal(conta, linhas[conta], denom, meses_nums, pct_label)
+        if intencao == "percentual":
+            st.info(f"No acumulado selecionado, **{conta}** representa **{fmt_pct(pct)}** da base de {'receita' if visao == 'DRE' else 'recebimentos'}, com valor de **{fmt_brl_display(total)}**.")
+        else:
+            vals = [float(linhas[conta].get(m, 0.0)) for m in meses_nums]
+            maior_m = meses_nums[vals.index(max(vals))] if vals else None
+            menor_m = meses_nums[vals.index(min(vals))] if vals else None
+            if maior_m and menor_m:
+                st.info(f"Leitura gerencial: maior valor em **{MES_NUM_TO_PT[maior_m]}** e menor valor em **{MES_NUM_TO_PT[menor_m]}**. Acumulado do período: **{fmt_brl_display(total)}**.")
+        return
+
+    if intencao == "maior_despesa":
+        grupo = grupo_detectado or st.selectbox("Qual conta/grupo deseja abrir?", opcoes_grupos, key=f"agente_bi_grupo_{contexto_padrao}")
+        det = _bi_detalhar_despesas(excel_path, ano_ref, visao, grupo, meses_nums, base_total)
+        if det.empty:
+            st.info("Não encontrei lançamentos detalhados para essa conta no período selecionado.")
+            return
+        top = det.iloc[0]
+        st.success(f"Maior despesa em **{grupo}**: **{top['Despesa']}**, com **{fmt_brl_display(top['Valor'])}**, representando **{fmt_pct(top['% Base'])}** da base.")
+        st.dataframe(det.head(20).style.format({"Valor": lambda x: fmt_brl_display(x), "% Base": lambda x: fmt_pct(x)}).hide(axis="index"), use_container_width=True)
+        return
+
+    st.warning("Não consegui fixar a intenção com segurança. Trata-se de Conta de resultado ou despesa? Informe também o período, o mês e o ano.")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        visao_sel = st.selectbox("Visão", ["DRE", "DFC"], index=0 if contexto_padrao == "DRE" else 1, key=f"agente_bi_fallback_visao_{contexto_padrao}")
+    with c2:
+        tipo_sel = st.selectbox("Tipo", ["Conta de resultado", "Despesa detalhada"], key=f"agente_bi_fallback_tipo_{contexto_padrao}")
+    with c3:
+        meses_sel = st.multiselect("Período", MESES_PT, default=[MES_NUM_TO_PT[m] for m in meses_nums], key=f"agente_bi_fallback_meses_{contexto_padrao}")
+    meses_fb = [MES_PT_TO_NUM[m] for m in meses_sel] or meses_nums
+    denom_fb = bases["receita_total"] if visao_sel == "DRE" else bases["receb_total"]
+    pct_fb = "% Receita" if visao_sel == "DRE" else "% Recebimentos"
+    if tipo_sel == "Conta de resultado":
+        conta_fb = st.selectbox("Conta", list(bases[visao_sel].keys()), key=f"agente_bi_fallback_conta_{contexto_padrao}")
+        _bi_tabela_mensal(conta_fb, bases[visao_sel][conta_fb], denom_fb, meses_fb, pct_fb)
+    else:
+        grupo_fb = st.selectbox("Despesa/Grupo", list(_bi_prefixos_por_visao(visao_sel).keys()), key=f"agente_bi_fallback_grupo_{contexto_padrao}")
+        det = _bi_detalhar_despesas(excel_path, ano_ref, visao_sel, grupo_fb, meses_fb, float(sum(denom_fb.get(m, 0.0) for m in meses_fb)))
+        if det.empty:
+            st.info("Sem lançamentos para essa seleção.")
+        else:
+            st.dataframe(det.head(30).style.format({"Valor": lambda x: fmt_brl_display(x), "% Base": lambda x: fmt_pct(x)}).hide(axis="index"), use_container_width=True)
 
 # =========================
 # Main: lê Excel 1x e usa nas páginas
