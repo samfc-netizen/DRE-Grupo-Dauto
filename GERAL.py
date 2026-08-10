@@ -6,6 +6,9 @@ import streamlit as st
 import plotly.express as px
 import os
 import glob
+import csv
+from pathlib import Path
+from io import StringIO
 
 # =========================
 # Normalização de texto (para filtros robustos)
@@ -1293,20 +1296,413 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
     fig.update_layout(xaxis_title="Mês", yaxis_title="Valor (R$)")
     st.plotly_chart(fig, use_container_width=True)
 
+
 # =========================
-# Main: lê Excel 1x e usa nas páginas
+# Página 4: Controles fiscais
+# =========================
+MAPA_EMPRESAS_FISCAL = {
+    1: "GUARÁ",
+    4: "ADE",
+    6: "GAMA",
+    8: "LUZIÂNIA",
+    9: "ÚNICA",
+    12: "SOFNORTE",
+    13: "CEILÂNDIA",
+    14: "S IA",
+    15: "UNAÍ",
+    16: "AG LINDAS",
+    20: "DAUTO SERVIÇO",
+    22: "GUARÁ",
+    24: "LUZIÂNIA",
+}
+
+ORDEM_LOJAS_FISCAL = [
+    "ADE", "AG LINDAS", "CEILÂNDIA", "DAUTO SERVIÇO", "GAMA",
+    "GUARÁ", "LUZIÂNIA", "S IA", "SOFNORTE", "UNAÍ", "ÚNICA",
+]
+
+MESES_NOME_FISCAL = {
+    1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR", 5: "MAI", 6: "JUN",
+    7: "JUL", 8: "AGO", 9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ",
+}
+
+
+def _fiscal_localizar_arquivo(nome: str) -> Path:
+    pasta_app = Path(__file__).resolve().parent
+    candidatos = [
+        pasta_app / nome,
+        Path.cwd() / nome,
+        pasta_app / "dados" / nome,
+        Path.cwd() / "dados" / nome,
+    ]
+    for caminho in candidatos:
+        if caminho.exists():
+            return caminho
+    raise FileNotFoundError(
+        f"Não encontrei '{nome}'. Coloque o arquivo na mesma pasta do app "
+        "ou dentro da pasta 'dados' no repositório."
+    )
+
+
+def _fiscal_ler_texto(caminho: Path) -> str:
+    for enc in ("utf-8-sig", "cp1252", "latin1"):
+        try:
+            return caminho.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            pass
+    return caminho.read_text(encoding="latin1", errors="ignore")
+
+
+def _fiscal_valor(v) -> float:
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return 0.0
+    s = str(v).strip().replace('"', '').replace("R$", "").replace(" ", "")
+    if not s:
+        return 0.0
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _fiscal_codigo(v):
+    try:
+        return int(float(str(v).strip().strip('"')))
+    except Exception:
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _fiscal_carregar_cartoes(caminho_str: str, assinatura):
+    caminho = Path(caminho_str)
+    linhas = _fiscal_ler_texto(caminho).splitlines()
+    inicio = next((i for i, l in enumerate(linhas) if l.startswith("DUPLICATA;EMP;DTA.CAD;")), None)
+    if inicio is None:
+        raise ValueError("Cabeçalho do relatório de cartões não localizado.")
+
+    df = pd.read_csv(
+        StringIO("\n".join(linhas[inicio:])),
+        sep=";", dtype=str, engine="python", on_bad_lines="skip"
+    )
+    df["COD_EMPRESA"] = df["EMP"].apply(_fiscal_codigo)
+    df["DATA"] = pd.to_datetime(df["DTA.CAD"], dayfirst=True, errors="coerce")
+    df = df[df["COD_EMPRESA"].isin(MAPA_EMPRESAS_FISCAL) & df["DATA"].notna()].copy()
+
+    for c in ["VLR.BRU", "VLR.LÍQ", "VLR.TAX"]:
+        df[c] = df[c].apply(_fiscal_valor) if c in df.columns else 0.0
+
+    df["LOJA"] = df["COD_EMPRESA"].map(MAPA_EMPRESAS_FISCAL)
+    df["ANO"] = df["DATA"].dt.year.astype("Int64")
+    df["MES_NUM"] = df["DATA"].dt.month.astype("Int64")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def _fiscal_carregar_saidas(caminho_str: str, assinatura):
+    caminho = Path(caminho_str)
+    linhas = _fiscal_ler_texto(caminho).splitlines()
+    inicio = next((i for i, l in enumerate(linhas) if l.startswith("EMPRESA;DATA;VR. CON;")), None)
+    if inicio is None:
+        raise ValueError("Bloco 'REGISTRO DE SAÍDAS - RESUMO POR DATA' não localizado.")
+
+    cab = next(csv.reader([linhas[inicio]], delimiter=";", quotechar='"'))
+    regs = []
+    for linha in linhas[inicio + 1:]:
+        if not linha.strip():
+            if regs:
+                break
+            continue
+        try:
+            campos = next(csv.reader([linha], delimiter=";", quotechar='"'))
+        except Exception:
+            break
+        if len(campos) != len(cab):
+            break
+        if not campos[0].strip() or "-" not in campos[0]:
+            break
+        regs.append(campos)
+
+    if not regs:
+        raise ValueError("O bloco de saídas foi localizado, mas não contém registros.")
+
+    df = pd.DataFrame(regs, columns=cab)
+    df["COD_EMPRESA"] = (
+        df["EMPRESA"].astype(str).str.extract(r"^(\d+)", expand=False).apply(_fiscal_codigo)
+    )
+    df["DATA"] = pd.to_datetime(df["DATA"], dayfirst=True, errors="coerce")
+    df["VLR_CONTABIL"] = df["VR. CON"].apply(_fiscal_valor)
+    df = df[df["COD_EMPRESA"].isin(MAPA_EMPRESAS_FISCAL) & df["DATA"].notna()].copy()
+    df["LOJA"] = df["COD_EMPRESA"].map(MAPA_EMPRESAS_FISCAL)
+    df["ANO"] = df["DATA"].dt.year.astype("Int64")
+    df["MES_NUM"] = df["DATA"].dt.month.astype("Int64")
+    return df
+
+
+def _fiscal_conciliacao(cartoes, saidas):
+    c = (
+        cartoes.groupby(["LOJA", "ANO", "MES_NUM"], as_index=False)
+        .agg(
+            CARTAO_BRUTO=("VLR.BRU", "sum"),
+            CARTAO_LIQUIDO=("VLR.LÍQ", "sum"),
+            TAXAS=("VLR.TAX", "sum"),
+            LANCAMENTOS=("DUPLICATA", "count"),
+        )
+    )
+    s = (
+        saidas.groupby(["LOJA", "ANO", "MES_NUM"], as_index=False)
+        .agg(VLR_CONTABIL=("VLR_CONTABIL", "sum"))
+    )
+    d = s.merge(c, on=["LOJA", "ANO", "MES_NUM"], how="outer")
+    for col in ["VLR_CONTABIL", "CARTAO_BRUTO", "CARTAO_LIQUIDO", "TAXAS", "LANCAMENTOS"]:
+        d[col] = pd.to_numeric(d.get(col, 0), errors="coerce").fillna(0)
+    d["DIFERENCA"] = d["VLR_CONTABIL"] - d["CARTAO_BRUTO"]
+    d["PERC_CARTAO"] = (
+        d["CARTAO_BRUTO"].div(d["VLR_CONTABIL"].replace(0, pd.NA)).mul(100).fillna(0)
+    )
+    d["MES"] = d["MES_NUM"].map(MESES_NOME_FISCAL)
+    return d
+
+
+def _fiscal_style_tabela(df):
+    moeda_cols = ["VLR Contábil", "Cartão Bruto", "Diferença", "Cartão Líquido", "Taxas"]
+    pct_cols = ["% Cartão"]
+    fmt = {c: lambda x: fmt_brl_display(x) for c in moeda_cols if c in df.columns}
+    fmt.update({c: lambda x: fmt_pct(x) for c in pct_cols if c in df.columns})
+    if "Lançamentos" in df.columns:
+        fmt["Lançamentos"] = lambda x: f"{int(x):,}".replace(",", ".")
+
+    sty = df.style.format(fmt)
+
+    if "Cartão Bruto" in df.columns and "VLR Contábil" in df.columns:
+        def _cor(row):
+            try:
+                maior = float(row["Cartão Bruto"]) > float(row["VLR Contábil"])
+                bg = "background-color: rgba(220,53,69,.14); color:#a61b29;" if maior \
+                     else "background-color: rgba(31,78,121,.10); color:#1f4e79;"
+                return [bg] * len(row)
+            except Exception:
+                return [""] * len(row)
+        sty = sty.apply(_cor, axis=1)
+    return sty
+
+
+def pagina_controles_fiscais():
+    st.markdown(
+        """
+        <style>
+        .fiscal-hero {
+            padding: 1.1rem 1.3rem;
+            border: 1px solid rgba(49,51,63,.14);
+            border-radius: 16px;
+            background: linear-gradient(135deg, rgba(31,78,121,.08), rgba(255,255,255,.96));
+            margin-bottom: 1rem;
+        }
+        .fiscal-hero h1 { margin: 0; font-size: 2rem; }
+        .fiscal-hero p { margin: .3rem 0 0 0; opacity: .75; }
+        </style>
+        <div class="fiscal-hero">
+          <h1>Controles fiscais</h1>
+          <p>Conciliação mensal entre o valor contábil das notas emitidas e os cartões passados.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        arq_cartoes = _fiscal_localizar_arquivo("cartões passados.csv")
+        arq_saidas = _fiscal_localizar_arquivo("registro saídas.csv")
+        sig_c = (arq_cartoes.stat().st_mtime_ns, arq_cartoes.stat().st_size)
+        sig_s = (arq_saidas.stat().st_mtime_ns, arq_saidas.stat().st_size)
+        cartoes = _fiscal_carregar_cartoes(str(arq_cartoes), sig_c)
+        saidas = _fiscal_carregar_saidas(str(arq_saidas), sig_s)
+        base = _fiscal_conciliacao(cartoes, saidas)
+    except Exception as e:
+        st.error(f"Não foi possível carregar os arquivos fiscais: {e}")
+        st.info(
+            "No repositório, deixe `cartões passados.csv` e `registro saídas.csv` "
+            "na mesma pasta do PY ou dentro da pasta `dados/`."
+        )
+        return
+
+    anos = sorted(pd.to_numeric(base["ANO"], errors="coerce").dropna().astype(int).unique().tolist())
+    if not anos:
+        st.warning("Não encontrei anos válidos nos arquivos fiscais.")
+        return
+
+    f1, f2 = st.columns([1, 3])
+    with f1:
+        ano = st.selectbox("Ano", anos, index=len(anos)-1, key="fiscal_ano")
+    with f2:
+        st.caption(
+            f"Arquivos: {arq_cartoes.name} • {arq_saidas.name}"
+        )
+
+    ano_df = base[pd.to_numeric(base["ANO"], errors="coerce") == int(ano)].copy()
+    if ano_df.empty:
+        st.info("Sem dados para o ano selecionado.")
+        return
+
+    # Acumulado por loja
+    acum = (
+        ano_df.groupby("LOJA", as_index=False)
+        .agg(
+            VLR_CONTABIL=("VLR_CONTABIL", "sum"),
+            CARTAO_BRUTO=("CARTAO_BRUTO", "sum"),
+            CARTAO_LIQUIDO=("CARTAO_LIQUIDO", "sum"),
+            TAXAS=("TAXAS", "sum"),
+            LANCAMENTOS=("LANCAMENTOS", "sum"),
+        )
+    )
+    acum["DIFERENCA"] = acum["VLR_CONTABIL"] - acum["CARTAO_BRUTO"]
+    acum["PERC_CARTAO"] = (
+        acum["CARTAO_BRUTO"].div(acum["VLR_CONTABIL"].replace(0, pd.NA)).mul(100).fillna(0)
+    )
+    acum["_ord"] = acum["LOJA"].apply(
+        lambda x: ORDEM_LOJAS_FISCAL.index(x) if x in ORDEM_LOJAS_FISCAL else 999
+    )
+    acum = acum.sort_values("_ord").drop(columns="_ord")
+
+    total_cont = float(acum["VLR_CONTABIL"].sum())
+    total_cart = float(acum["CARTAO_BRUTO"].sum())
+    total_dif = total_cont - total_cart
+    pct_total = (total_cart / total_cont * 100) if total_cont else 0.0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("VLR contábil acumulado", fmt_brl_display(total_cont))
+    k2.metric("Cartão bruto acumulado", fmt_brl_display(total_cart))
+    k3.metric("Diferença acumulada", fmt_brl_display(total_dif))
+    k4.metric("% vendas em cartão", fmt_pct(pct_total))
+
+    st.divider()
+    st.markdown("## Drill por loja")
+    lojas = [x for x in ORDEM_LOJAS_FISCAL if x in ano_df["LOJA"].dropna().unique().tolist()]
+    if not lojas:
+        st.info("Nenhuma loja encontrada.")
+        return
+
+    loja_sel = st.selectbox(
+        "Selecione a loja",
+        options=lojas,
+        index=0,
+        key="fiscal_drill_loja",
+        help="Ao trocar a loja, a tabela mensal abaixo é atualizada automaticamente.",
+    )
+
+    loja = ano_df[ano_df["LOJA"] == loja_sel].sort_values("MES_NUM").copy()
+    loja_view = loja[
+        ["MES", "VLR_CONTABIL", "CARTAO_BRUTO", "DIFERENCA",
+         "PERC_CARTAO", "CARTAO_LIQUIDO", "TAXAS", "LANCAMENTOS"]
+    ].rename(columns={
+        "MES": "Mês",
+        "VLR_CONTABIL": "VLR Contábil",
+        "CARTAO_BRUTO": "Cartão Bruto",
+        "DIFERENCA": "Diferença",
+        "PERC_CARTAO": "% Cartão",
+        "CARTAO_LIQUIDO": "Cartão Líquido",
+        "TAXAS": "Taxas",
+        "LANCAMENTOS": "Lançamentos",
+    })
+
+    lc = float(loja["VLR_CONTABIL"].sum())
+    lcb = float(loja["CARTAO_BRUTO"].sum())
+    ld = lc - lcb
+    lp = (lcb / lc * 100) if lc else 0.0
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric(f"{loja_sel} • Contábil", fmt_brl_display(lc))
+    a2.metric(f"{loja_sel} • Cartões", fmt_brl_display(lcb))
+    a3.metric(f"{loja_sel} • Diferença", fmt_brl_display(ld))
+    a4.metric(f"{loja_sel} • % Cartão", fmt_pct(lp))
+
+    st.dataframe(
+        _fiscal_style_tabela(loja_view).hide(axis="index"),
+        use_container_width=True,
+        height=min(520, 86 + len(loja_view) * 36),
+    )
+    st.caption("Vermelho: cartão maior que VLR Contábil. Azul: cartão menor ou igual ao VLR Contábil.")
+
+    if not loja.empty:
+        chart = loja[["MES_NUM", "MES", "VLR_CONTABIL", "CARTAO_BRUTO"]].copy()
+        chart = chart.melt(
+            id_vars=["MES_NUM", "MES"],
+            value_vars=["VLR_CONTABIL", "CARTAO_BRUTO"],
+            var_name="Indicador", value_name="Valor"
+        )
+        chart["Indicador"] = chart["Indicador"].replace(
+            {"VLR_CONTABIL": "VLR Contábil", "CARTAO_BRUTO": "Cartão Bruto"}
+        )
+        fig = px.bar(
+            chart.sort_values("MES_NUM"),
+            x="MES", y="Valor", color="Indicador", barmode="group",
+            title=f"Evolução mensal — {loja_sel}",
+        )
+        fig.update_layout(xaxis_title="", yaxis_title="Valor (R$)", legend_title="")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+    st.markdown("## Acumulado por lojas")
+    acum_view = acum[
+        ["LOJA", "VLR_CONTABIL", "CARTAO_BRUTO", "DIFERENCA",
+         "PERC_CARTAO", "CARTAO_LIQUIDO", "TAXAS", "LANCAMENTOS"]
+    ].rename(columns={
+        "LOJA": "Loja",
+        "VLR_CONTABIL": "VLR Contábil",
+        "CARTAO_BRUTO": "Cartão Bruto",
+        "DIFERENCA": "Diferença",
+        "PERC_CARTAO": "% Cartão",
+        "CARTAO_LIQUIDO": "Cartão Líquido",
+        "TAXAS": "Taxas",
+        "LANCAMENTOS": "Lançamentos",
+    })
+    st.dataframe(
+        _fiscal_style_tabela(acum_view).hide(axis="index"),
+        use_container_width=True,
+        height=min(640, 86 + len(acum_view) * 36),
+    )
+
+    st.markdown("### Comparativo acumulado por loja")
+    graf_acum = acum[["LOJA", "VLR_CONTABIL", "CARTAO_BRUTO"]].melt(
+        id_vars="LOJA",
+        value_vars=["VLR_CONTABIL", "CARTAO_BRUTO"],
+        var_name="Indicador", value_name="Valor"
+    )
+    graf_acum["Indicador"] = graf_acum["Indicador"].replace(
+        {"VLR_CONTABIL": "VLR Contábil", "CARTAO_BRUTO": "Cartão Bruto"}
+    )
+    fig2 = px.bar(
+        graf_acum, x="LOJA", y="Valor", color="Indicador",
+        barmode="group", title=f"Acumulado por loja — {ano}"
+    )
+    fig2.update_layout(xaxis_title="", yaxis_title="Valor (R$)", legend_title="")
+    st.plotly_chart(fig2, use_container_width=True)
+
+
+# =========================
+# Main
 # =========================
 st.set_page_config(page_title="GERAL", layout="wide")
 st.sidebar.title("Menu")
 
-# Leitura automática do Excel (mesma pasta do app)
+pagina = st.sidebar.radio(
+    "Selecione:",
+    ["DRE Geral", "DFC Geral", "Faturamento", "Controles fiscais"],
+)
+
+if pagina == "Controles fiscais":
+    if st.sidebar.button("Atualizar dados fiscais", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    pagina_controles_fiscais()
+    st.stop()
+
+
+# As páginas abaixo dependem do Excel.
 def _auto_find_excel() -> str | None:
-    # Prioriza nomes comuns
     preferred = ["DRE E DFC GERAL.xlsx", "DRE_E_DFC_GERAL.xlsx", "BASE.xlsx", "BASE .xlsx"]
     for fn in preferred:
         if os.path.exists(fn):
             return fn
-    # Qualquer xlsx/xlsm na pasta (pega o mais recente)
     files = []
     for pat in ["*.xlsx", "*.xlsm", "*.xls"]:
         files.extend(glob.glob(pat))
@@ -1316,24 +1712,20 @@ def _auto_find_excel() -> str | None:
     files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return files[0]
 
+
 excel_path = _auto_find_excel()
 if not excel_path:
     st.sidebar.error("Não encontrei nenhum Excel (.xlsx/.xlsm/.xls) na mesma pasta do app.")
     st.stop()
 
 
+EXCEL_PATH = excel_path
 
-EXCEL_PATH = excel_path  # alias padrão
 def excel_signature(path: str):
-    """
-    Assinatura do arquivo para invalidar caches quando o Excel for atualizado (mesmo mantendo o mesmo nome).
-    Retorna (mtime_ns, size).
-    """
     stt = os.stat(path)
     return (stt.st_mtime_ns, stt.st_size)
 
 
-# Assinatura atual do arquivo (usada para invalidar st.cache_data quando o Excel muda)
 sig = excel_signature(EXCEL_PATH)
 EXCEL_SIG = sig
 
@@ -1344,10 +1736,7 @@ if not sheet_names:
     st.stop()
 st.sidebar.success("Excel carregado")
 
-# Filtros gerais
 meses_pt_sel = st.sidebar.multiselect("Meses", options=MESES_PT, default=MESES_PT)
-
-# Descobre anos disponíveis
 
 anos = set()
 for sheet in ["RECEITA", "NOTAS EMITIDAS", "RECEBIMENTO"]:
@@ -1366,8 +1755,6 @@ if not anos:
     st.stop()
 
 ano_ref = st.sidebar.selectbox("Ano de referência", options=anos, index=len(anos) - 1)
-
-pagina = st.sidebar.radio("Selecione:", ["DRE Geral", "DFC Geral", "Faturamento"])
 
 if pagina == "DRE Geral":
     pagina_dre_geral(excel_path, ano_ref, meses_pt_sel)
