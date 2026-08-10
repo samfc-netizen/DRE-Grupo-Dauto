@@ -6,6 +6,8 @@ import streamlit as st
 import plotly.express as px
 import os
 import glob
+import csv
+from io import StringIO
 from pathlib import Path
 
 # =========================
@@ -1377,7 +1379,11 @@ def _fiscal_codigo(v):
 def _fiscal_carregar_cartoes(caminho_str: str, assinatura):
     caminho = Path(caminho_str)
     linhas = _fiscal_ler_texto(caminho).splitlines()
-    inicio = next((i for i, l in enumerate(linhas) if l.startswith("DUPLICATA;EMP;DTA.CAD;")), None)
+    inicio = next((
+        i for i, linha in enumerate(linhas)
+        if [ _norm_txt(c) for c in linha.split(";")[:3] ]
+        == ["duplicata", "emp", "dta.cad"]
+    ), None)
     if inicio is None:
         raise ValueError("Cabeçalho do relatório de cartões não localizado.")
 
@@ -1402,7 +1408,11 @@ def _fiscal_carregar_cartoes(caminho_str: str, assinatura):
 def _fiscal_carregar_saidas(caminho_str: str, assinatura):
     caminho = Path(caminho_str)
     linhas = _fiscal_ler_texto(caminho).splitlines()
-    inicio = next((i for i, l in enumerate(linhas) if l.startswith("EMPRESA;DATA;VR. CON;")), None)
+    inicio = next((
+        i for i, linha in enumerate(linhas)
+        if [ _norm_txt(c) for c in linha.split(";")[:3] ]
+        == ["empresa", "data", "vr. con"]
+    ), None)
     if inicio is None:
         raise ValueError("Bloco 'REGISTRO DE SAÍDAS - RESUMO POR DATA' não localizado.")
 
@@ -1487,7 +1497,67 @@ def _fiscal_style_tabela(df):
     return sty
 
 
-def pagina_controles_fiscais():
+def _fiscal_resumo_impostos(excel_path, assinatura, saidas, ano_pagto, mes_pagto):
+    """Impostos pagos no mês versus notas/receita do mês de competência anterior."""
+    geral = read_sheet(excel_path, "DRE E DFC GERAL", assinatura)
+    receita = read_sheet(excel_path, "RECEITA", assinatura)
+    if geral is None or receita is None:
+        raise ValueError("Não encontrei as abas 'DRE E DFC GERAL' e 'RECEITA'.")
+
+    req_geral = {"CONTA DE RESULTADO", "DESPESA", "DTA.PAG", "VAL.PAG"}
+    if not req_geral.issubset(geral.columns):
+        faltam = sorted(req_geral.difference(geral.columns))
+        raise ValueError("Faltam colunas no Excel: " + ", ".join(faltam))
+    if not {"ANO", "MÊS", "RECEITA GRUPO"}.issubset(receita.columns):
+        raise ValueError("Na aba RECEITA preciso de ANO, MÊS e RECEITA GRUPO.")
+
+    referencia = pd.Timestamp(int(ano_pagto), int(mes_pagto), 1) - pd.DateOffset(months=1)
+    ano_comp, mes_comp = int(referencia.year), int(referencia.month)
+
+    g = geral.copy()
+    g["_DATA"] = pd.to_datetime(g["DTA.PAG"], dayfirst=True, errors="coerce")
+    g["_VALOR"] = pd.to_numeric(g["VAL.PAG"], errors="coerce").fillna(0.0)
+    g["_CONTA"] = g["CONTA DE RESULTADO"].map(_norm_txt)
+    g["_DESPESA"] = g["DESPESA"].map(_norm_txt)
+    g = g[
+        g["_CONTA"].str.startswith("00004 -")
+        & (g["_DATA"].dt.year == int(ano_pagto))
+        & (g["_DATA"].dt.month == int(mes_pagto))
+        & ~g["_DESPESA"].str.contains(r"substituicao tributaria|icms\s*-?\s*st", regex=True)
+    ].copy()
+
+    regras = [
+        ("Simples", r"simples"),
+        ("PIS", r"\bpis\b"),
+        ("COFINS", r"cofins"),
+        ("ICMS", r"\bicms\b"),
+        ("IRPJ", r"irpj"),
+        ("CSLL", r"csll|contribuicao social sobre o lucro"),
+    ]
+    valores = []
+    for imposto, padrao in regras:
+        valor = float(g.loc[g["_DESPESA"].str.contains(padrao, regex=True), "_VALOR"].sum())
+        valores.append({"Imposto": imposto, "Valor pago": valor})
+
+    notas = saidas[
+        (pd.to_numeric(saidas["ANO"], errors="coerce") == ano_comp)
+        & (pd.to_numeric(saidas["MES_NUM"], errors="coerce") == mes_comp)
+    ]
+    total_notas = float(pd.to_numeric(notas["VLR_CONTABIL"], errors="coerce").fillna(0).sum())
+
+    r = receita.copy()
+    r["_ANO"] = pd.to_numeric(r["ANO"], errors="coerce")
+    r["_MES"] = r["MÊS"].apply(parse_mes)
+    r["_RECEITA"] = pd.to_numeric(r["RECEITA GRUPO"], errors="coerce").fillna(0.0)
+    total_receita = float(r.loc[(r["_ANO"] == ano_comp) & (r["_MES"] == mes_comp), "_RECEITA"].sum())
+
+    resumo = pd.DataFrame(valores)
+    resumo["% sobre notas"] = resumo["Valor pago"].div(total_notas).mul(100) if total_notas else 0.0
+    resumo["% sobre receita"] = resumo["Valor pago"].div(total_receita).mul(100) if total_receita else 0.0
+    return resumo, total_notas, total_receita, referencia
+
+
+def pagina_controles_fiscais(excel_path=None, assinatura_excel=None):
     st.markdown(
         """
         <style>
@@ -1676,6 +1746,79 @@ def pagina_controles_fiscais():
     fig2.update_layout(xaxis_title="", yaxis_title="Valor (R$)", legend_title="")
     st.plotly_chart(fig2, use_container_width=True)
 
+    st.divider()
+    st.markdown("## Impostos pagos × faturamento do mês anterior")
+    st.caption(
+        "Consolidado do grupo. ICMS-ST não entra. O mês escolhido é o do pagamento; "
+        "notas emitidas e Receita Grupo são buscadas no mês imediatamente anterior."
+    )
+    if not excel_path:
+        st.warning("Não encontrei 'DRE E DFC GERAL.xlsx' para montar o comparativo tributário.")
+        return
+
+    base_periodos = read_sheet(excel_path, "DRE E DFC GERAL", assinatura_excel).copy()
+    conta_periodo = base_periodos.get("CONTA DE RESULTADO", pd.Series(index=base_periodos.index, dtype=str)).map(_norm_txt)
+    despesa_periodo = base_periodos.get("DESPESA", pd.Series(index=base_periodos.index, dtype=str)).map(_norm_txt)
+    mask_periodos = (
+        conta_periodo.str.startswith("00004 -")
+        & despesa_periodo.str.contains(r"simples|\bpis\b|cofins|\bicms\b|irpj|csll", regex=True)
+        & ~despesa_periodo.str.contains(r"substituicao tributaria|icms\s*-?\s*st", regex=True)
+    )
+    datas_impostos = pd.to_datetime(
+        base_periodos.loc[mask_periodos, "DTA.PAG"], dayfirst=True, errors="coerce"
+    )
+    periodos = sorted({(int(d.year), int(d.month)) for d in datas_impostos.dropna()})
+    if not periodos:
+        st.info("Não encontrei meses de pagamento no plano de contas.")
+        return
+    periodo_sel = st.selectbox(
+        "Mês de pagamento dos impostos",
+        options=periodos,
+        index=len(periodos) - 1,
+        format_func=lambda p: f"{MESES_NOME_FISCAL[p[1]]}/{p[0]}",
+        key="fiscal_periodo_impostos",
+    )
+    try:
+        resumo_imp, total_notas, total_receita, competencia = _fiscal_resumo_impostos(
+            excel_path, assinatura_excel, saidas, periodo_sel[0], periodo_sel[1]
+        )
+    except Exception as e:
+        st.error(f"Não foi possível calcular os impostos: {e}")
+        return
+
+    total_impostos = float(resumo_imp["Valor pago"].sum())
+    pct_notas = total_impostos / total_notas * 100 if total_notas else 0.0
+    pct_receita = total_impostos / total_receita * 100 if total_receita else 0.0
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Impostos pagos", fmt_brl_display(total_impostos))
+    c2.metric(f"Notas {MESES_NOME_FISCAL[competencia.month]}/{competencia.year}", fmt_brl_display(total_notas))
+    c3.metric("Receita Grupo", fmt_brl_display(total_receita))
+    c4.metric("Impostos / notas", fmt_pct(pct_notas))
+    c5.metric("Impostos / receita", fmt_pct(pct_receita))
+
+    tabela_imp = pd.concat([
+        resumo_imp,
+        pd.DataFrame([{
+            "Imposto": "TOTAL DE IMPOSTOS",
+            "Valor pago": total_impostos,
+            "% sobre notas": pct_notas,
+            "% sobre receita": pct_receita,
+        }]),
+    ], ignore_index=True).rename(columns={
+        "Valor pago": "Valor pago (R$)",
+        "% sobre notas": "% sobre notas emitidas",
+        "% sobre receita": "% sobre Receita Grupo",
+    })
+    st.dataframe(
+        tabela_imp.style.format({
+            "Valor pago (R$)": fmt_brl_display,
+            "% sobre notas emitidas": fmt_pct,
+            "% sobre Receita Grupo": fmt_pct,
+        }).hide(axis="index"),
+        use_container_width=True,
+        height=300,
+    )
+
 
 
 
@@ -1751,7 +1894,7 @@ def _page_faturamento():
     pagina_faturamento(excel_path, ano_ref, meses_pt_sel)
 
 def _page_controles_fiscais():
-    pagina_controles_fiscais()
+    pagina_controles_fiscais(excel_path, sig)
 
 paginas = {
     "Financeiro": [
