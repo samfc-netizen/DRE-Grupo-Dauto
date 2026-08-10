@@ -6,9 +6,7 @@ import streamlit as st
 import plotly.express as px
 import os
 import glob
-import csv
 from pathlib import Path
-from io import StringIO
 
 # =========================
 # Normalização de texto (para filtros robustos)
@@ -1297,6 +1295,7 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
     st.plotly_chart(fig, use_container_width=True)
 
 
+
 # =========================
 # Página 4: Controles fiscais
 # =========================
@@ -1678,87 +1677,92 @@ def pagina_controles_fiscais():
     st.plotly_chart(fig2, use_container_width=True)
 
 
-# =========================
-# Main
-# =========================
-st.set_page_config(page_title="GERAL", layout="wide")
-st.sidebar.title("Menu")
 
-pagina = st.sidebar.radio(
-    "Selecione:",
-    ["DRE Geral", "DFC Geral", "Faturamento", "Controles fiscais"],
+
+
+# =========================
+# Navegação multipage (arquivo único)
+# =========================
+st.set_page_config(
+    page_title="Painel Geral",
+    page_icon="📊",
+    layout="wide",
 )
 
-if pagina == "Controles fiscais":
-    if st.sidebar.button("Atualizar dados fiscais", use_container_width=True):
+def _localizar_excel_principal():
+    pasta_app = Path(__file__).resolve().parent
+    candidatos = [
+        pasta_app / "DRE E DFC GERAL.xlsx",
+        Path.cwd() / "DRE E DFC GERAL.xlsx",
+    ]
+    for p in candidatos:
+        if p.exists():
+            return str(p)
+    return None
+
+excel_path = _localizar_excel_principal()
+sig = None
+if excel_path:
+    try:
+        sig = os.path.getmtime(excel_path)
+    except Exception:
+        sig = None
+
+anos_disponiveis = []
+if excel_path:
+    try:
+        _tmp = read_sheet(excel_path, "RECEITA", sig)
+        if _tmp is not None and "ANO" in _tmp.columns:
+            anos_disponiveis = sorted(
+                pd.to_numeric(_tmp["ANO"], errors="coerce").dropna().astype(int).unique().tolist()
+            )
+    except Exception:
+        anos_disponiveis = []
+
+if not anos_disponiveis:
+    anos_disponiveis = [pd.Timestamp.today().year]
+
+with st.sidebar:
+    st.markdown("## Filtros gerais")
+    ano_ref = st.selectbox("Ano", anos_disponiveis, index=len(anos_disponiveis)-1)
+    meses_pt_sel = st.multiselect("Meses", MESES_PT, default=MESES_PT)
+
+    st.divider()
+    if st.button("Atualizar dados", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-    pagina_controles_fiscais()
-    st.stop()
 
-
-# As páginas abaixo dependem do Excel.
-def _auto_find_excel() -> str | None:
-    preferred = ["DRE E DFC GERAL.xlsx", "DRE_E_DFC_GERAL.xlsx", "BASE.xlsx", "BASE .xlsx"]
-    for fn in preferred:
-        if os.path.exists(fn):
-            return fn
-    files = []
-    for pat in ["*.xlsx", "*.xlsm", "*.xls"]:
-        files.extend(glob.glob(pat))
-    files = [f for f in files if os.path.isfile(f)]
-    if not files:
-        return None
-    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return files[0]
-
-
-excel_path = _auto_find_excel()
-if not excel_path:
-    st.sidebar.error("Não encontrei nenhum Excel (.xlsx/.xlsm/.xls) na mesma pasta do app.")
-    st.stop()
-
-
-EXCEL_PATH = excel_path
-
-def excel_signature(path: str):
-    stt = os.stat(path)
-    return (stt.st_mtime_ns, stt.st_size)
-
-
-sig = excel_signature(EXCEL_PATH)
-EXCEL_SIG = sig
-
-st.sidebar.caption(f"Excel: **{excel_path}**")
-sheet_names = get_sheet_names(excel_path, sig)
-if not sheet_names:
-    st.sidebar.error(f"Não consegui abrir '{excel_path}'.")
-    st.stop()
-st.sidebar.success("Excel carregado")
-
-meses_pt_sel = st.sidebar.multiselect("Meses", options=MESES_PT, default=MESES_PT)
-
-anos = set()
-for sheet in ["RECEITA", "NOTAS EMITIDAS", "RECEBIMENTO"]:
-    df_tmp = read_sheet(excel_path, sheet, sig)
-    if df_tmp is not None and "ANO" in df_tmp.columns:
-        anos |= set(pd.to_numeric(df_tmp["ANO"], errors="coerce").dropna().astype(int).unique().tolist())
-
-df_tmp = read_sheet(excel_path, "DRE E DFC GERAL", sig)
-if df_tmp is not None and "DTA.PAG" in df_tmp.columns:
-    d = pd.to_datetime(df_tmp["DTA.PAG"], errors="coerce", dayfirst=True)
-    anos |= set(d.dt.year.dropna().astype(int).unique().tolist())
-
-anos = sorted(list(anos))
-if not anos:
-    st.error("Não encontrei nenhum ANO válido no Excel.")
-    st.stop()
-
-ano_ref = st.sidebar.selectbox("Ano de referência", options=anos, index=len(anos) - 1)
-
-if pagina == "DRE Geral":
+def _page_dre():
+    if not excel_path:
+        st.error("Não encontrei 'DRE E DFC GERAL.xlsx' no repositório.")
+        return
     pagina_dre_geral(excel_path, ano_ref, meses_pt_sel)
-elif pagina == "DFC Geral":
+
+def _page_dfc():
+    if not excel_path:
+        st.error("Não encontrei 'DRE E DFC GERAL.xlsx' no repositório.")
+        return
     pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel)
-else:
+
+def _page_faturamento():
+    if not excel_path:
+        st.error("Não encontrei 'DRE E DFC GERAL.xlsx' no repositório.")
+        return
     pagina_faturamento(excel_path, ano_ref, meses_pt_sel)
+
+def _page_controles_fiscais():
+    pagina_controles_fiscais()
+
+paginas = {
+    "Financeiro": [
+        st.Page(_page_dre, title="DRE Geral", icon="📈"),
+        st.Page(_page_dfc, title="DFC Geral", icon="💵"),
+        st.Page(_page_faturamento, title="Faturamento", icon="🧾"),
+    ],
+    "Controles": [
+        st.Page(_page_controles_fiscais, title="Controles Fiscais", icon="🧮"),
+    ],
+}
+
+pg = st.navigation(paginas)
+pg.run()
