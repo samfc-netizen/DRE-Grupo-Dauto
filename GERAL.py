@@ -7,8 +7,45 @@ import plotly.express as px
 import os
 import glob
 import csv
-from io import StringIO
+from io import StringIO, BytesIO
+import base64
+from PIL import Image
 from pathlib import Path
+
+
+# Logos incorporadas ao arquivo (Única + Dauto)
+LOGO_UNICA_B64 = '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'
+LOGO_DAUTO_B64 = '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'
+
+def _img_from_b64(data):
+    return Image.open(BytesIO(base64.b64decode(data)))
+
+def _inject_modern_ui():
+    st.markdown("""
+    <style>
+    .stApp { background:#f6f8fc; }
+    [data-testid="stMainBlockContainer"] {padding-top:1.5rem; max-width:1800px;}
+    [data-testid="stSidebar"] {background:#eef2f7; border-right:1px solid #e1e7ef;}
+    [data-testid="stSidebar"] .stButton button {border-radius:10px;}
+    div[data-testid="stMetric"] {background:white;border:1px solid #e3e8f0;border-radius:14px;padding:16px 18px;box-shadow:0 2px 10px rgba(15,23,42,.04);}
+    div[data-testid="stMetric"] label {font-weight:700;color:#64748b;}
+    div[data-testid="stMetricValue"] {font-weight:800;color:#0f172a;}
+    .eyebrow {font-size:.78rem;font-weight:800;letter-spacing:.08em;color:#64748b;text-transform:uppercase;margin-bottom:4px;}
+    .hero-title {font-size:2rem;font-weight:850;color:#0f172a;line-height:1.1;margin:0;}
+    .hero-sub {color:#64748b;margin-top:6px;margin-bottom:16px;}
+    h1,h2,h3 {color:#0f172a;}
+    hr {border-color:#e7ebf1;}
+    [data-testid="stDataFrame"], .sticky-table-wrap {box-shadow:0 2px 10px rgba(15,23,42,.035);}
+    .block-container {padding-bottom:3rem;}
+    </style>
+    """, unsafe_allow_html=True)
+
+def _sidebar_brand():
+    st.markdown(
+        '<div style="display:flex;gap:10px;align-items:center;justify-content:center;margin:2px 0 18px;">'
+        f'<img src="data:image/png;base64,{LOGO_UNICA_B64}" style="width:66px;height:66px;border-radius:50%;object-fit:cover;">'
+        f'<img src="data:image/png;base64,{LOGO_DAUTO_B64}" style="width:66px;height:66px;border-radius:50%;object-fit:cover;">'
+        '</div>', unsafe_allow_html=True)
 
 # =========================
 # Normalização de texto (para filtros robustos)
@@ -441,7 +478,7 @@ def dfc_prefix_map():
 # Página 1: DRE Geral
 # =========================
 def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
-    st.title("DRE Geral — (DRE e DFC GERAL)")
+    st.markdown('<div class="eyebrow">Financeiro • Visão Gerencial</div><div class="hero-title">DRE Gerencial</div><div class="hero-sub">Visão consolidada do resultado da empresa</div>', unsafe_allow_html=True)
 
     # Meses selecionados no filtro lateral
     meses_pt = (meses_pt_sel or [])
@@ -596,7 +633,44 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     dre["%ACUMULADO"] = (dre["ACUMULADO"] / receita_acum * 100.0) if receita_acum != 0 else 0.0
 
 
-    st.subheader("DRE (JAN–DEZ) — Valores em R$ e % sobre Receita")
+    # ===== Cockpit executivo (mesmos dados do DRE; apenas nova apresentação) =====
+    receita_acum_c = float(sum(receita_total_by_month.get(m, 0.0) for m in meses_nums))
+    compras_acum_c = float(sum(compras_by_month.get(m, 0.0) for m in meses_nums))
+    despesas_acum_c = float(sum(deducoes_by_month.get(m,0.0)+pessoal_by_month.get(m,0.0)+adm_by_month.get(m,0.0)+com_by_month.get(m,0.0)+fin_by_month.get(m,0.0)+inv_by_month.get(m,0.0)+op_by_month.get(m,0.0)+ret_by_month.get(m,0.0) for m in meses_nums))
+    resultado_acum_c = float(sum(resultado_by_month.get(m, 0.0) for m in meses_nums))
+    lucro_bruto_c = receita_acum_c - compras_acum_c - float(sum(deducoes_by_month.get(m,0.0) for m in meses_nums))
+    margem_c = (resultado_acum_c / receita_acum_c * 100.0) if receita_acum_c else 0.0
+
+    st.markdown('<div class="eyebrow">Cockpit Executivo</div>', unsafe_allow_html=True)
+    k1,k2,k3,k4,k5 = st.columns(5)
+    k1.metric("Receita", fmt_brl_display(receita_acum_c))
+    k2.metric("Lucro bruto", fmt_brl_display(lucro_bruto_c))
+    k3.metric("Despesas totais", fmt_brl_display(despesas_acum_c))
+    k4.metric("Resultado operacional", fmt_brl_display(resultado_acum_c))
+    k5.metric("Margem operacional", fmt_pct(margem_c))
+
+    evo = pd.DataFrame({
+        "Mês": [MES_NUM_TO_PT[m] for m in meses_nums],
+        "Receita": [receita_total_by_month.get(m,0.0) for m in meses_nums],
+        "Lucro Bruto": [receita_total_by_month.get(m,0.0)-compras_by_month.get(m,0.0)-deducoes_by_month.get(m,0.0) for m in meses_nums],
+        "Resultado": [resultado_by_month.get(m,0.0) for m in meses_nums],
+    }).melt(id_vars="Mês", var_name="Indicador", value_name="Valor")
+    despesas_rank = pd.DataFrame({
+        "Conta":["Compras","Pessoal","Administrativas","Comerciais","Financeiras","Operacionais","Investimentos","Retiradas Sócios"],
+        "Valor":[sum(compras_by_month.get(m,0.0) for m in meses_nums),sum(pessoal_by_month.get(m,0.0) for m in meses_nums),sum(adm_by_month.get(m,0.0) for m in meses_nums),sum(com_by_month.get(m,0.0) for m in meses_nums),sum(fin_by_month.get(m,0.0) for m in meses_nums),sum(op_by_month.get(m,0.0) for m in meses_nums),sum(inv_by_month.get(m,0.0) for m in meses_nums),sum(ret_by_month.get(m,0.0) for m in meses_nums)]
+    }).sort_values("Valor", ascending=True)
+    g1,g2=st.columns([1.35,1])
+    with g1:
+        fig_evo=px.line(evo,x="Mês",y="Valor",color="Indicador",markers=True,title="Evolução mensal")
+        fig_evo.update_layout(height=340,margin=dict(l=10,r=10,t=55,b=10),legend_title="",paper_bgcolor="white",plot_bgcolor="white")
+        st.plotly_chart(fig_evo,use_container_width=True)
+    with g2:
+        fig_rank=px.bar(despesas_rank,x="Valor",y="Conta",orientation="h",title="Maiores despesas • acumulado")
+        fig_rank.update_layout(height=340,margin=dict(l=10,r=10,t=55,b=10),showlegend=False,paper_bgcolor="white",plot_bgcolor="white")
+        st.plotly_chart(fig_rank,use_container_width=True)
+
+    st.markdown('<div class="eyebrow">DRE Gerencial</div>', unsafe_allow_html=True)
+    st.subheader("Demonstrativo de Resultado — Valores em R$ e % sobre Receita")
 
     def style_resultado(row):
         styles = [""] * len(row)
@@ -690,9 +764,11 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     pc1, pc2 = st.columns([1.2, 1])
     with pc1:
         if not pie_df.empty:
-            fig = px.pie(pie_df, names="Conta", values="Valor",
-                         title=f"Contas sobre Receita — {mes_sel}",
+            _rank = pie_df.sort_values("Valor", ascending=True)
+            fig = px.bar(_rank, x="Valor", y="Conta", orientation="h",
+                         title=f"Composição das contas — {mes_sel}",
                          hover_data={"% Receita": True, "Valor": True})
+            fig.update_layout(showlegend=False, height=360, margin=dict(l=10,r=10,t=55,b=10), paper_bgcolor="white", plot_bgcolor="white")
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Sem valores no mês selecionado para o gráfico.")
@@ -1827,10 +1903,11 @@ def pagina_controles_fiscais(excel_path=None, assinatura_excel=None):
 # Navegação multipage (arquivo único)
 # =========================
 st.set_page_config(
-    page_title="Painel Geral",
-    page_icon="📊",
+    page_title="Painel Geral | Dauto & Única",
+    page_icon=_img_from_b64(LOGO_DAUTO_B64),
     layout="wide",
 )
+_inject_modern_ui()
 
 def _localizar_excel_principal():
     pasta_app = Path(__file__).resolve().parent
@@ -1866,6 +1943,7 @@ if not anos_disponiveis:
     anos_disponiveis = [pd.Timestamp.today().year]
 
 with st.sidebar:
+    _sidebar_brand()
     st.markdown("## Filtros gerais")
     ano_ref = st.selectbox("Ano", anos_disponiveis, index=len(anos_disponiveis)-1)
     meses_pt_sel = st.multiselect("Meses", MESES_PT, default=MESES_PT)
