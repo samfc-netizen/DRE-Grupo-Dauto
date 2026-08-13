@@ -27,6 +27,20 @@ def _inject_modern_ui():
     [data-testid="stMainBlockContainer"] {padding-top:1.5rem; max-width:1800px;}
     [data-testid="stSidebar"] {background:#eef2f7; border-right:1px solid #e1e7ef;}
     [data-testid="stSidebar"] .stButton button {border-radius:10px;}
+    [data-testid="stSidebar"] div[data-testid="stCheckbox"] {
+        background:#ffffff;
+        border:1px solid #dfe5ee;
+        border-radius:8px;
+        padding:5px 8px;
+        margin-bottom:5px;
+        min-height:38px;
+        display:flex;
+        align-items:center;
+    }
+    [data-testid="stSidebar"] div[data-testid="stCheckbox"]:hover {
+        border-color:#b8c4d6;
+        box-shadow:0 1px 4px rgba(15,23,42,.05);
+    }
     div[data-testid="stMetric"] {background:white;border:1px solid #e3e8f0;border-radius:14px;padding:16px 18px;box-shadow:0 2px 10px rgba(15,23,42,.04);}
     div[data-testid="stMetric"] label {font-weight:700;color:#64748b;}
     div[data-testid="stMetricValue"] {font-weight:800;color:#0f172a;}
@@ -1946,7 +1960,15 @@ with st.sidebar:
     _sidebar_brand()
     st.markdown("## Filtros gerais")
     ano_ref = st.selectbox("Ano", anos_disponiveis, index=len(anos_disponiveis)-1)
-    meses_pt_sel = st.multiselect("Meses", MESES_PT, default=MESES_PT)
+
+    # Meses em checklist
+    st.markdown("**Meses**")
+    meses_pt_sel = []
+    _mes_cols = st.columns(2, gap="small")
+    for _idx, _mes in enumerate(MESES_PT):
+        with _mes_cols[_idx % 2]:
+            if st.checkbox(_mes, value=True, key=f"filtro_mes_{_mes}"):
+                meses_pt_sel.append(_mes)
 
     st.divider()
     if st.button("Atualizar dados", use_container_width=True):
