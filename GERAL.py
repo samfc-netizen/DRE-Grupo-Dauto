@@ -605,8 +605,23 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         resultado_by_month[m] = receita_total_by_month[m] - outros
 
 
-    # Resultado antes das retiradas e despesas financeiras (volta essas duas linhas no resultado)
-    resultado_antes_by_month = {m: float(resultado_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) + float(ret_by_month.get(m, 0.0)) for m in range(1, 13)}
+    # Total de todas as despesas exibidas acima
+    total_despesas_by_month = {
+        m: (float(compras_by_month.get(m, 0.0)) + float(deducoes_by_month.get(m, 0.0)) +
+            float(pessoal_by_month.get(m, 0.0)) + float(adm_by_month.get(m, 0.0)) +
+            float(com_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) +
+            float(ret_by_month.get(m, 0.0)) + float(inv_by_month.get(m, 0.0)) +
+            float(op_by_month.get(m, 0.0)))
+        for m in range(1, 13)
+    }
+
+    # Resultado antes das retiradas, despesas financeiras e investimentos
+    # (volta essas três linhas no resultado operacional)
+    resultado_antes_by_month = {
+        m: (float(resultado_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) +
+            float(ret_by_month.get(m, 0.0)) + float(inv_by_month.get(m, 0.0)))
+        for m in range(1, 13)
+    }
 
     linhas = [
         ("+ RECEITA", receita_by_month),
@@ -620,6 +635,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         ("- RETIRADAS SÓCIOS", ret_by_month),
         ("- INVESTIMENTOS", inv_by_month),
         ("- DESPESAS OPERACIONAIS", op_by_month),
+        ("TOTAL DESPESAS", total_despesas_by_month),
         ("RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS", resultado_antes_by_month),
         ("RESULTADO OPERACIONAL", resultado_by_month),
     ]
@@ -985,8 +1001,23 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
                   com_by_month[m] + fin_by_month[m] + inv_by_month[m] + op_by_month[m] + ret_by_month[m])
         saldo_by_month[m] = receb_total_by_month[m] - saidas
 
-    # Resultado antes das retiradas e despesas financeiras (volta essas duas linhas no resultado)
-    resultado_antes_by_month = {m: float(saldo_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) + float(ret_by_month.get(m, 0.0)) for m in range(1, 13)}
+    # Total de todas as despesas/saídas exibidas acima
+    total_despesas_by_month = {
+        m: (float(fornec_by_month.get(m, 0.0)) + float(ded_by_month.get(m, 0.0)) +
+            float(pessoal_by_month.get(m, 0.0)) + float(adm_by_month.get(m, 0.0)) +
+            float(com_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) +
+            float(ret_by_month.get(m, 0.0)) + float(inv_by_month.get(m, 0.0)) +
+            float(op_by_month.get(m, 0.0)))
+        for m in range(1, 13)
+    }
+
+    # Resultado antes das retiradas, despesas financeiras e investimentos
+    # (volta essas três linhas no saldo operacional)
+    resultado_antes_by_month = {
+        m: (float(saldo_by_month.get(m, 0.0)) + float(fin_by_month.get(m, 0.0)) +
+            float(ret_by_month.get(m, 0.0)) + float(inv_by_month.get(m, 0.0)))
+        for m in range(1, 13)
+    }
 
     linhas = [
         ("+ RECEBIMENTOS", receb_by_month),
@@ -1000,6 +1031,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         ("- RETIRADAS SÓCIOS", ret_by_month),
         ("- INVESTIMENTOS", inv_by_month),
         ("- DESPESAS OPERACIONAIS", op_by_month),
+        ("TOTAL DESPESAS", total_despesas_by_month),
         ("RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS", resultado_antes_by_month),
         ("SALDO OPERACIONAL", saldo_by_month),
     ]
