@@ -636,7 +636,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         ("- INVESTIMENTOS", inv_by_month),
         ("- DESPESAS OPERACIONAIS", op_by_month),
         ("TOTAL DESPESAS", total_despesas_by_month),
-        ("RESULTADO ANTES DAS RETIRADAS E DESP. FINANCEIRAS", resultado_antes_by_month),
+        ("RESULTADO ANTES DAS RETIRADAS, DESP. FINANCEIRAS e INVESTIMENTOS", resultado_antes_by_month),
         ("RESULTADO OPERACIONAL", resultado_by_month),
     ]
 
