@@ -1400,9 +1400,11 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
     })
 
     drill_logistico = pd.DataFrame(linhas_drill)
+    # Média mensal no drill, considerando exatamente os períodos selecionados.
+    drill_logistico["Média"] = drill_logistico["Acumulado"] / qtd_periodos_sel
     render_sticky_table(
         drill_logistico,
-        value_cols=["Acumulado"],
+        value_cols=["Acumulado", "Média"],
         pct_cols=["% Faturamento Logístico"],
         highlight_row_label=col_fat_logistico,
     )
