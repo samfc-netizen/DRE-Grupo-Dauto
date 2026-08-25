@@ -1344,6 +1344,12 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
 
     totais_principal = tabela_principal[canais_tabela_principal].sum(axis=0).reset_index()
     totais_principal.columns = ["Canal", "Acumulado"]
+
+    # Média mensal de cada canal considerando exatamente os períodos selecionados no filtro.
+    # Ex.: JAN + FEV + MAR => Acumulado / 3.
+    qtd_periodos_sel = max(len(meses_nums), 1)
+    totais_principal["Média"] = totais_principal["Acumulado"] / qtd_periodos_sel
+
     total_receita_grupo = float(totais_principal.loc[totais_principal["Canal"] == col_receita_grupo, "Acumulado"].sum())
     totais_principal["% Receita Grupo"] = totais_principal["Acumulado"].apply(
         lambda x: (x / total_receita_grupo * 100.0) if total_receita_grupo != 0 else 0.0
@@ -1353,7 +1359,7 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
     st.markdown("### Acumulado por canal no período selecionado")
     render_sticky_table(
         totais_principal,
-        value_cols=["Acumulado"],
+        value_cols=["Acumulado", "Média"],
         pct_cols=["% Receita Grupo"],
         highlight_row_label=col_receita_grupo,
     )
