@@ -2098,9 +2098,32 @@ def lojas_read_sheet(excel_path, sheet_name, sig):
 def lojas_prep_cmv_fat(excel_path, sig):
     csv_path = Path(excel_path).parent / 'faturamento lojas Dauto.csv'
     if not csv_path.exists():
-        return None
-    df = pd.read_csv(csv_path, encoding='latin1', sep=';', engine='c', dtype=str, low_memory=False)
-    df.columns = [str(c).strip() for c in df.columns]
+        alternativo = Path(excel_path).parent / 'faturamento lojas Dauto(1).csv'
+        if alternativo.exists():
+            csv_path = alternativo
+        else:
+            return None
+    # Exportação Autcom: contém cabeçalho informativo antes da tabela.
+    # Localiza a linha real de colunas, sem depender de quantidade fixa de linhas.
+    import io
+    with open(csv_path, 'r', encoding='latin1', errors='replace', newline='') as arquivo:
+        linhas = arquivo.readlines()
+    inicio = next((i for i, linha in enumerate(linhas)
+                   if linha.lstrip('\ufeff \t').upper().startswith('DATA;')
+                   and ';EMP;' in linha.upper()
+                   and ';VR.TOTAL;' in linha.upper()
+                   and ';CUSTO;' in linha.upper()), None)
+    if inicio is None:
+        raise ValueError('Cabeçalho DATA;...;EMP;...;VR.TOTAL;CUSTO não encontrado no CSV de faturamento.')
+    df = pd.read_csv(io.StringIO(''.join(linhas[inicio:])),
+                     encoding='latin1', sep=';', engine='python', dtype=str,
+                     on_bad_lines='warn')
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    obrigatorias = {'DATA', 'EMP', 'VR.TOTAL', 'CUSTO'}
+    faltantes = obrigatorias - set(df.columns)
+    if faltantes:
+        raise ValueError(f'Colunas ausentes no faturamento: {sorted(faltantes)}')
+    df = df[df['DATA'].notna() & df['EMP'].notna()].copy()
     df['LOJA'] = df['EMP'].map(lambda x: LOJAS_EMP.get(lojas_emp_codigo(x),'NÃO MAPEADA'))
     df['_dt'] = pd.to_datetime(df['DATA'], errors='coerce', dayfirst=True)
     df['_ano'] = df['_dt'].dt.year
