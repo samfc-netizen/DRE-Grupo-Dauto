@@ -2136,7 +2136,7 @@ def lojas_prep_cmv_fat(excel_path, sig):
     df['_receita_markup'] = df['_receita'].where(df['_emp_codigo'] != 20, 0.0)
     df.loc[df['_emp_codigo'] == 20, 'LOJA'] = 'UNAÍ'
     df['_loja_norm'] = df['LOJA'].map(lojas__norm_txt)
-    return df
+    return df[df['_loja_norm'].isin({'guara','ade','gama','luziania','sofnorte','ceilandia','s ia','unai','ag lindas'})].copy()
 
 @st.cache_data(show_spinner=False)
 def lojas_prep_dre_detail(excel_path: str, sig) -> Optional[pd.DataFrame]:
@@ -2488,31 +2488,69 @@ def lojas_render_geral(df, meses_nums, result_labels):
 
 
 def lojas_drill_distribuicao(dre_det, ano, meses, lojas_sel, linha, group_def, key):
-    """Distribuição da conta selecionada por loja, com abertura por plano de contas."""
+    """Matriz mensal por loja, com afunilamento opcional pelo plano de contas."""
     if linha not in group_def or dre_det is None or dre_det.empty:
         return
     conf = group_def[linha]
     prefix = conf['prefix']
-    deslocar = conf.get('shift_next', False)
-    periodos = [(ano, meses)] if not deslocar else [
-        (ano, [m+1 for m in meses if m < 12]),
-        (ano+1, [1] if 12 in meses else [])]
-    base = pd.concat([dre_det[(dre_det['_ano']==a)&dre_det['_mes'].isin(mm)] for a,mm in periodos],ignore_index=True)
-    base = base[base['CONTA DE RESULTADO'].astype(str).str.startswith(prefix)].copy()
+    deslocar = bool(conf.get('shift_next', False))
+    # Para despesas M+1, o mês exibido corresponde ao mês anterior ao pagamento.
+    base = dre_det[dre_det['CONTA DE RESULTADO'].astype(str).str.startswith(prefix)].copy()
     base = base[~base['CONTA DE RESULTADO'].astype(str).str.startswith('00016 -')]
+    base = base[~base['_loja_norm'].isin({'unica', 'dauto servicos', 'nao mapeada'})]
     eff = lojas_lojas_effective(lojas_sel)
     if eff:
         base = base[base['_loja_norm'].isin({lojas__norm_txt(x) for x in eff})]
     if base.empty:
+        st.info('Sem lançamentos dessa conta para as lojas selecionadas.')
         return
-    st.markdown('### Distribuição por loja e plano de contas')
-    nivel = st.radio('Detalhamento', ['Por loja','Por plano de contas','Loja × Plano de contas'],horizontal=True,key=key+'_nivel')
-    cols = {'Por loja':['LOJA'],'Por plano de contas':['DESPESA'],'Loja × Plano de contas':['LOJA','DESPESA']}[nivel]
-    tab = base.groupby(cols,dropna=False)['_v'].sum().reset_index(name='Valor').sort_values('Valor',ascending=False)
-    total = float(tab['Valor'].sum())
-    tab['Participação %'] = tab['Valor'].map(lambda v: (v/total*100) if total else 0)
-    st.dataframe(tab.style.format({'Valor':lojas_fmt_brl,'Participação %':lojas_fmt_pct}).hide(axis='index'),use_container_width=True)
+    periodo = pd.to_datetime(base['_dt'], errors='coerce')
+    if deslocar:
+        periodo = periodo - pd.DateOffset(months=1)
+    base['_ano_exibicao'] = periodo.dt.year
+    base['_mes_exibicao'] = periodo.dt.month
+    base = base[(base['_ano_exibicao'] == int(ano)) & base['_mes_exibicao'].isin(meses)].copy()
+    if base.empty:
+        st.info('Sem lançamentos dessa conta nos meses selecionados.')
+        return
 
+    st.markdown('### Distribuição mensal por loja e plano de contas')
+    nivel = st.radio('Visualização', ['Por loja', 'Por plano de contas', 'Loja × Plano de contas'],
+                     horizontal=True, key=key+'_nivel')
+    base['DESPESA'] = base['DESPESA'].fillna('SEM PLANO DE CONTAS').astype(str)
+    if nivel == 'Por plano de contas':
+        lojas_disponiveis = sorted(base['LOJA'].dropna().unique().tolist())
+        loja_foco = st.selectbox('Loja para detalhamento', ['TODAS'] + lojas_disponiveis,
+                                 key=key+'_loja_foco')
+        if loja_foco != 'TODAS':
+            base = base[base['LOJA'] == loja_foco]
+        agrupamento = ['DESPESA']
+    elif nivel == 'Loja × Plano de contas':
+        agrupamento = ['LOJA', 'DESPESA']
+    else:
+        agrupamento = ['LOJA']
+
+    matriz = base.pivot_table(index=agrupamento, columns='_mes_exibicao', values='_v',
+                              aggfunc='sum', fill_value=0.0)
+    matriz = matriz.reindex(columns=meses, fill_value=0.0)
+    matriz.columns = [lojas_MES_NUM_TO_PT[m] for m in meses]
+    matriz['TOTAL'] = matriz.sum(axis=1)
+    matriz = matriz.sort_values('TOTAL', ascending=False).reset_index()
+    if len(agrupamento) == 2:
+        matriz.insert(0, 'LOJA / PLANO DE CONTAS', matriz['LOJA'].astype(str) + ' | ' + matriz['DESPESA'].astype(str))
+        matriz = matriz.drop(columns=['LOJA', 'DESPESA'])
+    else:
+        matriz = matriz.rename(columns={agrupamento[0]: 'LOJA' if nivel == 'Por loja' else 'PLANO DE CONTAS'})
+    total = {c: float(matriz[c].sum()) for c in [lojas_MES_NUM_TO_PT[m] for m in meses] + ['TOTAL']}
+    primeira = matriz.columns[0]
+    matriz = pd.concat([matriz, pd.DataFrame([{primeira: 'TOTAL GERAL', **total}])], ignore_index=True)
+    colunas_valores = [c for c in matriz.columns if c != primeira]
+    exibicao = matriz.copy()
+    for c in colunas_valores:
+        exibicao[c] = exibicao[c].map(lojas_fmt_brl)
+    render_sticky_table(exibicao, highlight_row_label='TOTAL GERAL')
+    st.download_button('Exportar distribuição em CSV', matriz.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig'),
+                       file_name='distribuicao_lojas_mensal.csv', mime='text/csv', key=key+'_export')
 
 def lojas_dre_page():
     st.title("DRE")
@@ -2718,7 +2756,7 @@ def pagina_resultado_lojas():
         st.error('Não foi possível carregar faturamento e lançamentos das lojas.'); return
     st.title('Resultado Lojas')
     opcoes = sorted(set(fat['LOJA']) | {'GUARÁ','ADE','GAMA','LUZIÂNIA','SOFNORTE','CEILÂNDIA','S IA','UNAÍ','AG LINDAS'})
-    opcoes = [x for x in opcoes if x not in ('ÚNICA','DAUTO SERVIÇOS','NÃO MAPEADA')]
+    opcoes = [x for x in opcoes if lojas__norm_txt(x) not in ('unica','dauto servicos','nao mapeada')]
     lojas_sel = st.multiselect('Filtrar lojas', ['TODAS']+opcoes, default=['TODAS'], key='resultado_lojas_filtro')
     meses_nums = [lojas_MES_PT_TO_NUM[m] for m in meses_pt_sel] if meses_pt_sel else list(range(1,13))
     if not lojas_sel:
