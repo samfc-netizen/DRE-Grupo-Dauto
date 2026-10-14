@@ -2776,6 +2776,48 @@ def lojas_dfc_page():
     lojas_despesas_e_historicos(dre_det, ano_ref, meses_nums, lojas_sel, linha_sel, receb_periodo, False, group_def, key_prefix="dfc")
 
 
+
+# =========================
+# Painel comparativo: resultado e saldo operacional por loja e mês
+# =========================
+def lojas_painel_operacional():
+    st.subheader("Painel operacional por loja e mês")
+    st.caption("Resultado Operacional = DRE | Saldo Operacional = DFC. Mesmas regras de competência, exclusões e filtros das demonstrações.")
+    metricas = ["Resultado Operacional (DRE)", "Saldo Operacional (DFC)"]
+    metrica = st.radio("Indicador", metricas, horizontal=True, key="painel_lojas_indicador")
+    selecionadas = lojas_lojas_effective(lojas_sel)
+    todas = ['ADE', 'GAMA', 'LUZIÂNIA', 'GUARÁ', 'SOFNORTE', 'CEILÂNDIA', 'S IA', 'UNAÍ', 'AG LINDAS']
+    nomes = [l for l in todas if not selecionadas or lojas__norm_txt(l) in {lojas__norm_txt(x) for x in selecionadas}]
+    if not nomes:
+        st.info("Nenhuma loja selecionada.")
+        return
+    resultado = {}
+    for loja in nomes:
+        sel = [loja]
+        if metrica.startswith("Resultado"):
+            dados = fat[(fat['_ano'] == int(ano_ref)) & (fat['_loja_norm'] == lojas__norm_txt(loja))]
+            receita = dados.groupby('_mes')['_receita'].sum()
+            cmv = dados.groupby('_mes')['_cmv_base'].sum()
+            ded = lojas__shift_next(lojas__sum_dre_group_by_month(dre_det, ano_ref, sel, '00004 -'), lojas__sum_dre_group_by_month(dre_det, ano_ref + 1, sel, '00004 -'))
+            pes = lojas__shift_next(lojas__sum_dre_group_by_month(dre_det, ano_ref, sel, '00006 -'), lojas__sum_dre_group_by_month(dre_det, ano_ref + 1, sel, '00006 -'))
+            grupos = [lojas__sum_dre_group_by_month(dre_det, ano_ref, sel, pref) for pref in ('00007 -','00009 -','00011 -','00014 -','00015 -','00017 -')]
+            resultado[loja] = {m: float(receita.get(m, 0)) - float(cmv.get(m, 0)) - ded[m] - pes[m] - sum(g[m] for g in grupos) for m in range(1,13)}
+        else:
+            receb = lojas__sheet_month_value_map(df_receb, ano_ref, sel)
+            compras = lojas__shift_prev(lojas__sheet_month_value_map(df_compras, ano_ref, sel), lojas__sheet_month_value_map(df_compras, ano_ref - 1, sel))
+            devol = lojas__shift_prev(lojas__sheet_month_value_map(df_devol, ano_ref, sel), lojas__sheet_month_value_map(df_devol, ano_ref - 1, sel))
+            grupos = [lojas__sum_dre_group_by_month(dre_det, ano_ref, sel, pref) for pref in ('00004 -','00006 -','00007 -','00009 -','00011 -','00014 -','00015 -','00017 -')]
+            resultado[loja] = {m: receb[m] - compras[m] + devol[m] - sum(g[m] for g in grupos) for m in range(1,13)}
+    matriz = pd.DataFrame([{'MÊS': lojas_MES_NUM_TO_PT[m], **{loja: resultado[loja][m] for loja in nomes}} for m in meses_nums])
+    matriz['TOTAL LOJAS'] = matriz[nomes].sum(axis=1)
+    totais = {'MÊS': 'TOTAL', **{loja: float(matriz[loja].sum()) for loja in nomes}, 'TOTAL LOJAS': float(matriz['TOTAL LOJAS'].sum())}
+    matriz = pd.concat([matriz, pd.DataFrame([totais])], ignore_index=True)
+    st.dataframe(matriz.style.format({c: lambda v: lojas_fmt_brl(v) for c in nomes + ['TOTAL LOJAS']}).map(
+        lambda v: 'color: #1f4e79; font-weight: 700' if v >= 0 else 'color: #c00000; font-weight: 700', subset=nomes + ['TOTAL LOJAS']
+    ), use_container_width=True, hide_index=True)
+    st.download_button('Exportar painel em CSV', matriz.to_csv(index=False, sep=';', decimal=',').encode('utf-8-sig'),
+                       file_name='painel_resultado_lojas.csv', mime='text/csv', key='painel_operacional_export')
+
 def pagina_resultado_lojas():
     global fat, dre_det, df_receb, df_compras, df_devol, lojas_sel, meses_nums
     if not excel_path:
@@ -2803,7 +2845,8 @@ def pagina_resultado_lojas():
     meses_nums = [lojas_MES_PT_TO_NUM[m] for m in meses_pt_sel] if meses_pt_sel else list(range(1,13))
     if not lojas_sel:
         st.info("Selecione ao menos uma loja."); return
-    tab_dre,tab_dfc=st.tabs(['DRE Lojas','DFC Lojas'])
+    tab_painel,tab_dre,tab_dfc=st.tabs(['Painel Operacional','DRE Lojas','DFC Lojas'])
+    with tab_painel: lojas_painel_operacional()
     with tab_dre: lojas_dre_page()
     with tab_dfc: lojas_dfc_page()
 
