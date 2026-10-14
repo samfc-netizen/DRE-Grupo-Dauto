@@ -2099,7 +2099,7 @@ def lojas_prep_cmv_fat(excel_path, sig):
     csv_path = Path(excel_path).parent / 'faturamento lojas Dauto.csv'
     if not csv_path.exists():
         return None
-    df = pd.read_csv(csv_path, encoding='latin1', sep=None, engine='python', dtype=str)
+    df = pd.read_csv(csv_path, encoding='latin1', sep=';', engine='c', dtype=str, low_memory=False)
     df.columns = [str(c).strip() for c in df.columns]
     df['LOJA'] = df['EMP'].map(lambda x: LOJAS_EMP.get(lojas_emp_codigo(x),'NÃO MAPEADA'))
     df['_dt'] = pd.to_datetime(df['DATA'], errors='coerce', dayfirst=True)
