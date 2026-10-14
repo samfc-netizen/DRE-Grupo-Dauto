@@ -2107,6 +2107,11 @@ def lojas_prep_cmv_fat(excel_path, sig):
     df['_mes'] = df['_dt'].dt.month
     df['_receita'] = df['VR.TOTAL'].map(lojas_to_num)
     df['_cmv'] = df['CUSTO'].map(lojas_to_num)
+    # EMP 20 compõe receita de Unaí, mas não seu CMV nem seu markup.
+    df['_emp_codigo'] = df['EMP'].map(lojas_emp_codigo)
+    df['_cmv_base'] = df['_cmv'].where(df['_emp_codigo'] != 20, 0.0)
+    df['_receita_markup'] = df['_receita'].where(df['_emp_codigo'] != 20, 0.0)
+    df.loc[df['_emp_codigo'] == 20, 'LOJA'] = 'UNAÍ'
     df['_loja_norm'] = df['LOJA'].map(lojas__norm_txt)
     return df
 
@@ -2443,9 +2448,48 @@ def lojas_calc_receita_cmv_by_month() -> Tuple[Dict[int, float], Dict[int, float
         lojas_eff_norm = set(lojas__norm_txt(x) for x in lojas_eff)
         d = d[d["_loja_norm"].isin(lojas_eff_norm)]
     rec = d.groupby("_mes")["_receita"].sum()
-    cmv = d.groupby("_mes")["_cmv"].sum()
+    cmv = d.groupby("_mes")["_cmv_base"].sum()
     return ({m: float(rec.get(m, 0.0)) for m in range(1, 13)},
             {m: float(cmv.get(m, 0.0)) for m in range(1, 13)})
+
+def lojas_render_geral(df, meses_nums, result_labels):
+    """Mesma tabela HTML sticky do painel GERAL, inclusive formatação monetária."""
+    d = df.copy()
+    for c in d.columns:
+        if c.endswith('%'):
+            d[c] = d[c].map(lambda x: '—' if pd.isna(x) else lojas_fmt_pct(x))
+        elif c != 'Linha':
+            d[c] = d.apply(lambda r: lojas_format_brl(r[c]) if r['Linha'] == 'Markup' else lojas_fmt_brl(r[c]), axis=1)
+    # Valores pré-formatados para preservar Markup sem R$.
+    render_sticky_table(d, highlight_row_label=result_labels[-1])
+
+
+def lojas_drill_distribuicao(dre_det, ano, meses, lojas_sel, linha, group_def, key):
+    """Distribuição da conta selecionada por loja, com abertura por plano de contas."""
+    if linha not in group_def or dre_det is None or dre_det.empty:
+        return
+    conf = group_def[linha]
+    prefix = conf['prefix']
+    deslocar = conf.get('shift_next', False)
+    periodos = [(ano, meses)] if not deslocar else [
+        (ano, [m+1 for m in meses if m < 12]),
+        (ano+1, [1] if 12 in meses else [])]
+    base = pd.concat([dre_det[(dre_det['_ano']==a)&dre_det['_mes'].isin(mm)] for a,mm in periodos],ignore_index=True)
+    base = base[base['CONTA DE RESULTADO'].astype(str).str.startswith(prefix)].copy()
+    base = base[~base['CONTA DE RESULTADO'].astype(str).str.startswith('00016 -')]
+    eff = lojas_lojas_effective(lojas_sel)
+    if eff:
+        base = base[base['_loja_norm'].isin({lojas__norm_txt(x) for x in eff})]
+    if base.empty:
+        return
+    st.markdown('### Distribuição por loja e plano de contas')
+    nivel = st.radio('Detalhamento', ['Por loja','Por plano de contas','Loja × Plano de contas'],horizontal=True,key=key+'_nivel')
+    cols = {'Por loja':['LOJA'],'Por plano de contas':['DESPESA'],'Loja × Plano de contas':['LOJA','DESPESA']}[nivel]
+    tab = base.groupby(cols,dropna=False)['_v'].sum().reset_index(name='Valor').sort_values('Valor',ascending=False)
+    total = float(tab['Valor'].sum())
+    tab['Participação %'] = tab['Valor'].map(lambda v: (v/total*100) if total else 0)
+    st.dataframe(tab.style.format({'Valor':lojas_fmt_brl,'Participação %':lojas_fmt_pct}).hide(axis='index'),use_container_width=True)
+
 
 def lojas_dre_page():
     st.title("DRE")
@@ -2470,15 +2514,21 @@ def lojas_dre_page():
     ret_by_m = lojas__sum_dre_group_by_month(dre_det, ano_ref, lojas_sel, "00016 -")
     op_by_m  = lojas__sum_dre_group_by_month(dre_det, ano_ref, lojas_sel, "00017 -")
 
-    markup_by_m = {m: lojas_safe_div(receita_by_m[m], cmv_by_m[m]) for m in range(1, 13)}
+    # Markup usa exclusivamente receita EMP 15 de Unaí (exclui EMP 20).
+    fat_markup = fat[fat["_ano"] == int(ano_ref)].copy()
+    eff_markup = lojas_lojas_effective(lojas_sel)
+    if eff_markup:
+        fat_markup = fat_markup[fat_markup["_loja_norm"].isin({lojas__norm_txt(x) for x in eff_markup})]
+    receita_markup_m = fat_markup.groupby("_mes")["_receita_markup"].sum()
+    markup_by_m = {m: lojas_safe_div(float(receita_markup_m.get(m, 0)), cmv_by_m[m]) for m in range(1, 13)}
     margem_bruta_by_m = {m: receita_by_m[m] - cmv_by_m[m] for m in range(1, 13)}
 
     def _sum_costs(m):
         return (ded_by_m[m] + pes_by_m[m] + adm_by_m[m] + com_by_m[m] + fin_by_m[m] +
-                imo_by_m[m] + inv_by_m[m] + ret_by_m[m] + op_by_m[m])
+                imo_by_m[m] + inv_by_m[m] + op_by_m[m])
 
     resultado_oper_by_m = {m: margem_bruta_by_m[m] - _sum_costs(m) for m in range(1, 13)}
-    res_antes_by_m = {m: resultado_oper_by_m[m] + fin_by_m[m] + ret_by_m[m] + inv_by_m[m] for m in range(1, 13)}
+    res_antes_by_m = {m: resultado_oper_by_m[m] + fin_by_m[m] + inv_by_m[m] for m in range(1, 13)}
 
     rows_no_markup = [
         ("RECEITA", receita_by_m),
@@ -2491,9 +2541,9 @@ def lojas_dre_page():
         ("DESPESAS FINANCEIRAS", fin_by_m),
         ("IMOBILIZADO", imo_by_m),
         ("INVESTIMENTOS", inv_by_m),
-        ("RETIRADAS SÓCIOS", ret_by_m),
+        
         ("DESPESAS OPERACIONAIS", op_by_m),
-        ("RES. ANTES DAS DEP FINANC E RETIRADAS/INVESTIMENTOS", res_antes_by_m),
+        ("RES. ANTES DAS DESP. FINANCEIRAS/INVESTIMENTOS", res_antes_by_m),
         ("RESULTADO OPERACIONAL", resultado_oper_by_m),
     ]
 
@@ -2506,14 +2556,14 @@ def lojas_dre_page():
         pt = lojas_MES_NUM_TO_PT[m]
         mk[pt] = float(markup_by_m.get(m, 0.0))
         mk[f"{pt}%"] = np.nan
-    mk["ACUM"] = float(np.nanmean([markup_by_m.get(m, 0.0) for m in meses_nums])) if meses_nums else 0.0
+    mk["ACUM"] = lojas_safe_div(sum(float(receita_markup_m.get(m,0)) for m in meses_nums),sum(cmv_by_m[m] for m in meses_nums))
     mk["ACUM%"] = np.nan
 
     # coloca Markup após CMV
     df = pd.concat([df.iloc[0:2], pd.DataFrame([mk])[df.columns], df.iloc[2:]], ignore_index=True)
 
     st.subheader("DRE — Valores em R$ e % sobre Receita (Markup sem %)")
-    result_labels = ["RESULTADO OPERACIONAL", "RES. ANTES DAS DEP FINANC E RETIRADAS/INVESTIMENTOS"]
+    result_labels = ["RESULTADO OPERACIONAL", "RES. ANTES DAS DESP. FINANCEIRAS/INVESTIMENTOS"]
     sty = lojas_style_result_rows(df, result_labels)
     sty = lojas_apply_formats(sty, meses_nums)
 
@@ -2527,7 +2577,7 @@ def lojas_dre_page():
     for m in meses_nums:
         sty = sty.format({lojas_MES_NUM_TO_PT[m]: (lambda x, _f=_fmt_markup: _f(x))}, subset=pd.IndexSlice[df["Linha"] == "Markup", [lojas_MES_NUM_TO_PT[m]]])
 
-    st.dataframe(sty.hide(axis="index"), use_container_width=True)
+    lojas_render_geral(df, meses_nums, result_labels)
 
     receita_periodo = float(sum(receita_by_m.get(m, 0.0) for m in meses_nums))
     linha_sel = lojas_drill_kpis(df, meses_nums, receita_periodo, "Receita", key_prefix="dre")
@@ -2540,9 +2590,10 @@ def lojas_dre_page():
         "DESPESAS FINANCEIRAS": {"prefix": "00011 -", "shift_next": False},
         "IMOBILIZADO": {"prefix": "00014 -", "shift_next": False},
         "INVESTIMENTOS": {"prefix": "00015 -", "shift_next": False},
-        "RETIRADAS SÓCIOS": {"prefix": "00016 -", "shift_next": False},
+        
         "DESPESAS OPERACIONAIS": {"prefix": "00017 -", "shift_next": False},
     }
+    lojas_drill_distribuicao(dre_det, ano_ref, meses_nums, lojas_sel, linha_sel, group_def, "dre_dist")
     lojas_despesas_e_historicos(dre_det, ano_ref, meses_nums, lojas_sel, linha_sel, receita_periodo, True, group_def, key_prefix="dre")
 
 # =========================
@@ -2577,10 +2628,10 @@ def lojas_dfc_page():
 
     def _sum_costs(m):
         return (ded_by_m[m] + pes_by_m[m] + adm_by_m[m] + com_by_m[m] + fin_by_m[m] +
-                imo_by_m[m] + inv_by_m[m] + ret_by_m[m] + op_by_m[m])
+                imo_by_m[m] + inv_by_m[m] + op_by_m[m])
 
     saldo_oper_by_m = {m: margem_bruta_by_m[m] - _sum_costs(m) for m in range(1, 13)}
-    saldo_antes_by_m = {m: saldo_oper_by_m[m] + ret_by_m[m] + inv_by_m[m] + fin_by_m[m] for m in range(1, 13)}
+    saldo_antes_by_m = {m: saldo_oper_by_m[m] + inv_by_m[m] + fin_by_m[m] for m in range(1, 13)}
 
     rows = [
         ("RECEBIMENTO", receb_by_m),
@@ -2595,19 +2646,19 @@ def lojas_dfc_page():
         ("DESPESAS FINANCEIRAS", fin_by_m),
         ("IMOBILIZADO", imo_by_m),
         ("INVESTIMENTOS", inv_by_m),
-        ("RETIRADAS SÓCIOS", ret_by_m),
+        
         ("DESPESAS OPERACIONAIS", op_by_m),
-        ("SALDO OPERACIONAL ANTES DE RETIRADAS/INVESTIMENTOS/DESP FINANCEIRAS", saldo_antes_by_m),
+        ("SALDO ANTES DE INVESTIMENTOS/DESP. FINANCEIRAS", saldo_antes_by_m),
         ("SALDO OPERACIONAL", saldo_oper_by_m),
     ]
 
     df = lojas_build_matrix_df(rows, meses_nums, receb_by_m, add_acum=True)
 
     st.subheader("DFC — Valores em R$ e % sobre Recebimento")
-    result_labels = ["SALDO OPERACIONAL", "SALDO OPERACIONAL ANTES DE RETIRADAS/INVESTIMENTOS/DESP FINANCEIRAS"]
+    result_labels = ["SALDO OPERACIONAL", "SALDO ANTES DE INVESTIMENTOS/DESP. FINANCEIRAS"]
     sty = lojas_style_result_rows(df, result_labels)
     sty = lojas_apply_formats(sty, meses_nums)
-    st.dataframe(sty.hide(axis="index"), use_container_width=True)
+    lojas_render_geral(df, meses_nums, result_labels)
 
     receb_periodo = float(sum(receb_by_m.get(m, 0.0) for m in meses_nums))
     linha_sel = lojas_drill_kpis(df, meses_nums, receb_periodo, "Recebimento", key_prefix="dfc")
@@ -2620,9 +2671,10 @@ def lojas_dfc_page():
         "DESPESAS FINANCEIRAS": {"prefix": "00011 -", "shift_next": False},
         "IMOBILIZADO": {"prefix": "00014 -", "shift_next": False},
         "INVESTIMENTOS": {"prefix": "00015 -", "shift_next": False},
-        "RETIRADAS SÓCIOS": {"prefix": "00016 -", "shift_next": False},
+        
         "DESPESAS OPERACIONAIS": {"prefix": "00017 -", "shift_next": False},
     }
+    lojas_drill_distribuicao(dre_det, ano_ref, meses_nums, lojas_sel, linha_sel, group_def, "dfc_dist")
     lojas_despesas_e_historicos(dre_det, ano_ref, meses_nums, lojas_sel, linha_sel, receb_periodo, False, group_def, key_prefix="dfc")
 
 
