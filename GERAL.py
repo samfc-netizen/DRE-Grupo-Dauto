@@ -2124,6 +2124,8 @@ def lojas_prep_cmv_fat(excel_path, sig):
     if faltantes:
         raise ValueError(f'Colunas ausentes no faturamento: {sorted(faltantes)}')
     df = df[df['DATA'].notna() & df['EMP'].notna()].copy()
+    # Bloqueio na origem: EMP 9 / 009 nunca participa de Resultado Lojas.
+    df = df[df['EMP'].map(lojas_emp_codigo) != 9].copy()
     df['LOJA'] = df['EMP'].map(lambda x: LOJAS_EMP.get(lojas_emp_codigo(x),'NÃO MAPEADA'))
     df['_dt'] = pd.to_datetime(df['DATA'], errors='coerce', dayfirst=True)
     df['_ano'] = df['_dt'].dt.year
@@ -2144,6 +2146,10 @@ def lojas_prep_dre_detail(excel_path: str, sig) -> Optional[pd.DataFrame]:
     if df is None:
         return None
     d = df.copy()
+    # Filtro obrigatório antes de qualquer cálculo, totalização ou drill.
+    if "EMP" not in d.columns:
+        raise ValueError("Coluna EMP ausente em DRE E DFC GERAL")
+    d = d[d["EMP"].map(lojas_emp_codigo).isin({1,4,6,8,12,13,14,15,16,22,24})].copy()
     if "DTA.PAG" not in d.columns:
         for c in ["DTA.CAD", "DTA.VEN"]:
             if c in d.columns:
@@ -2182,10 +2188,11 @@ def lojas__sheet_month_value_map(df: pd.DataFrame, ano_ref: int, lojas_sel: List
     d = d[(d["_ano"] == int(ano_ref)) & (d["_mes"].notna())].copy()
 
     base_cols = {col_ano, col_mes, "_ano", "_mes"}
-    lojas_cols = [c for c in d.columns if c not in base_cols and not str(c).startswith("Unnamed")]
+    lojas_cols = [c for c in d.columns if c not in base_cols and not str(c).startswith("Unnamed")
+                  and lojas__norm_txt(c) not in {"unica", "unica atacadista", "009", "9", "emp 9", "emp 009", "dauto servicos"}]
     lojas_cols_norm = { lojas__norm_txt(c): c for c in lojas_cols }
 
-    lojas_eff = lojas_lojas_effective(lojas_sel)
+    lojas_eff = [l for l in lojas_lojas_effective(lojas_sel) if lojas__norm_txt(l) not in {"unica", "009", "9", "dauto servicos"}]
     if not lojas_eff:
         use_cols = [c for c in lojas_cols if lojas__norm_txt(c) not in {"unica", "dauto servicos"}]
     else:
@@ -2214,7 +2221,7 @@ def lojas__sheet_month_value_map(df: pd.DataFrame, ano_ref: int, lojas_sel: List
 def lojas__sum_dre_group_by_month(dre_det: pd.DataFrame, ano: int, lojas_sel: List[str], prefix: str) -> Dict[int, float]:
     if dre_det is None or dre_det.empty:
         return {m: 0.0 for m in range(1, 13)}
-    d = dre_det[dre_det["_ano"] == int(ano)].copy()
+    d = dre_det[(dre_det["_ano"] == int(ano)) & (dre_det["EMP"].map(lojas_emp_codigo) != 9)].copy()
 
     lojas_eff = lojas_lojas_effective(lojas_sel)
     if lojas_eff:
@@ -2749,6 +2756,11 @@ def pagina_resultado_lojas():
     assinatura = (os.stat(excel_path).st_mtime_ns, os.stat(csv_path).st_mtime_ns)
     fat = lojas_prep_cmv_fat(excel_path, assinatura)
     dre_det = lojas_prep_dre_detail(excel_path, assinatura)
+    # Defesa adicional contra dados em cache e formatos alternativos de EMP.
+    if fat is not None and "EMP" in fat.columns:
+        fat = fat[fat["EMP"].map(lojas_emp_codigo) != 9].copy()
+    if dre_det is not None and "EMP" in dre_det.columns:
+        dre_det = dre_det[dre_det["EMP"].map(lojas_emp_codigo) != 9].copy()
     df_receb = lojas_read_sheet(excel_path,'RECEBIMENTOS',assinatura)
     df_compras = lojas_read_sheet(excel_path,'COMPRAS',assinatura)
     df_devol = lojas_read_sheet(excel_path,'DEVOLUÇÕES',assinatura)
