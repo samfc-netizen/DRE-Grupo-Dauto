@@ -964,11 +964,17 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         st.error(f"Faltam abas no Excel: {', '.join(missing)}")
         return
 
-    req_r = {"MÊS", "ANO", "RECEBIMENTO"}
-    if not req_r.issubset(set(df_rec.columns)):
-        st.error("Na aba RECEBIMENTO preciso das colunas: 'MÊS', 'ANO', 'RECEBIMENTO'.")
+    # DFC GERAL: exclusivamente a aba RECEBIMENTO, com o total consolidado.
+    # A aba RECEBIMENTO LOJAS é reservada ao módulo Resultado Lojas.
+    colunas_rec = {str(c).strip().upper(): c for c in df_rec.columns}
+    coluna_mes = colunas_rec.get("MÊS", colunas_rec.get("MESES", colunas_rec.get("MES")))
+    coluna_valor = colunas_rec.get("RECEBIMENTO TOTAL", colunas_rec.get("RECEBIMENTO"))
+    if "ANO" not in colunas_rec or coluna_mes is None or coluna_valor is None:
+        st.error("A aba RECEBIMENTO (Geral) precisa das colunas MÊS, ANO e RECEBIMENTO TOTAL (ou RECEBIMENTO).")
         return
-    receb_by_month = agg_by_month_from_ano_mes(df_rec, "RECEBIMENTO", "ANO", "MÊS", ano_ref)
+    receb_by_month = agg_by_month_from_ano_mes(
+        df_rec, coluna_valor, colunas_rec["ANO"], coluna_mes, ano_ref
+    )
 
     req_g = {"CONTA DE RESULTADO", "DTA.PAG", "VAL.PAG"}
     if not req_g.issubset(set(df_geral.columns)):
@@ -2483,15 +2489,39 @@ def lojas_calc_receita_cmv_by_month() -> Tuple[Dict[int, float], Dict[int, float
             {m: float(cmv.get(m, 0.0)) for m in range(1, 13)})
 
 def lojas_render_geral(df, meses_nums, result_labels):
-    """Mesma tabela HTML sticky do painel GERAL, inclusive formatação monetária."""
+    """Tabela do Geral, com resultado positivo azul e negativo vermelho."""
     d = df.copy()
-    for c in d.columns:
-        if c.endswith('%'):
-            d[c] = d[c].map(lambda x: '—' if pd.isna(x) else lojas_fmt_pct(x))
-        elif c != 'Linha':
-            d[c] = d.apply(lambda r: lojas_format_brl(r[c]) if r['Linha'] == 'Markup' else lojas_fmt_brl(r[c]), axis=1)
-    # Valores pré-formatados para preservar Markup sem R$.
-    render_sticky_table(d, highlight_row_label=result_labels[-1])
+    colunas_numericas = [c for c in d.columns if c != 'Linha']
+    linhas_resultado = {str(x) for x in result_labels}
+    from html import escape
+    inject_sticky_table_css()
+    html = ['<div class="sticky-table-wrap"><table class="sticky-table"><thead><tr>']
+    html.extend(f'<th>{escape(str(c))}</th>' for c in d.columns)
+    html.append('</tr></thead><tbody>')
+    for _, row in d.iterrows():
+        nome = str(row['Linha'])
+        forte = nome in linhas_resultado
+        html.append('<tr class="row-strong">' if forte else '<tr>')
+        for col in d.columns:
+            if col == 'Linha':
+                html.append(f'<td class="text-left">{escape(nome)}</td>')
+                continue
+            val = row[col]
+            if pd.isna(val):
+                txt = '—'
+            elif col.endswith('%'):
+                txt = lojas_fmt_pct(val)
+            elif nome == 'Markup':
+                txt = lojas_format_brl(val)
+            else:
+                txt = lojas_fmt_brl(val)
+            classe = ''
+            if forte and pd.notna(val):
+                classe = 'neg-strong' if float(val) < 0 else 'pos-strong'
+            html.append(f'<td class="{classe}">{escape(txt)}</td>')
+        html.append('</tr>')
+    html.append('</tbody></table></div>')
+    st.markdown(''.join(html), unsafe_allow_html=True)
 
 
 def lojas_drill_distribuicao(dre_det, ano, meses, lojas_sel, linha, group_def, key):
