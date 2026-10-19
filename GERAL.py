@@ -488,6 +488,59 @@ def dfc_prefix_map():
     }
 
 
+def render_evolucao_mensal(base_ano, despesa, ano_ref, modo, denominadores=None):
+    """Evolução anual e drill-down, sem alterar as demais abas ou seus filtros."""
+    st.caption("Visão de janeiro a dezembro do ano selecionado. Os meses podem ser abertos individualmente.")
+    if base_ano is None or base_ano.empty:
+        st.info("Não há lançamentos para esta despesa no ano.")
+        return
+    dados = base_ano.copy()
+    if "DESPESA" not in dados.columns:
+        dados["DESPESA"] = "—"
+    dados["DESPESA_SINT"] = dados["DESPESA"].apply(sintetizar_despesa)
+    dados = dados[dados["DESPESA_SINT"] == despesa].copy()
+    dados["_mes_exibicao"] = pd.to_numeric(dados["_mes_exibicao"], errors="coerce")
+    dados = dados[dados["_mes_exibicao"].between(1, 12)]
+    serie = dados.groupby("_mes_exibicao")["_v"].sum()
+    valores = [float(serie.get(m, 0.0)) for m in range(1, 13)]
+    total = sum(valores)
+    ativos = sum(bool(v) for v in valores)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total anual", fmt_brl_display(total))
+    c2.metric("Média mensal (12 meses)", fmt_brl_display(total / 12))
+    c3.metric("Meses com movimento", f"{ativos} de 12")
+    graf = pd.DataFrame({"Mês": MESES_PT, "Valor": valores})
+    fig = px.bar(graf, x="Mês", y="Valor", text_auto=".2s", title="Evolução mensal da despesa")
+    fig.update_traces(marker_color="#2563eb")
+    fig.update_layout(height=320, margin=dict(l=10,r=10,t=45,b=10), paper_bgcolor="white", plot_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown("**Valores mensais e lançamentos**")
+    st.caption("Variação M/M: mês atual comparado ao anterior. A variação não é calculada quando o mês anterior é zero.")
+    for m in range(1, 13):
+        valor = valores[m - 1]
+        anterior = valores[m - 2] if m > 1 else None
+        variacao = (valor / anterior - 1) * 100 if anterior not in (None, 0) else None
+        var_txt = fmt_pct(variacao) if variacao is not None else "—"
+        if variacao is not None and variacao > 0:
+            var_txt = "+" + var_txt
+        denom = float((denominadores or {}).get(m, 0.0))
+        participacao = fmt_pct(valor / denom * 100) if denom else "—"
+        titulo = f"{MES_NUM_TO_PT[m]}  |  {fmt_brl_display(valor)}  |  M/M: {var_txt}  |  % {'Receita' if modo == 'DRE' else 'Recebimentos'}: {participacao}"
+        with st.expander(titulo, expanded=False):
+            linhas = dados[dados["_mes_exibicao"] == m].copy()
+            if linhas.empty:
+                st.caption("Sem lançamentos neste mês.")
+                continue
+            st.caption(f"{len(linhas)} lançamento(s) • Total: {fmt_brl_display(valor)}")
+            cols = [c for c in ["DTA.PAG", "FAVORECIDO", "HISTÓRICO", "DUPLICATA", "CONTA DE RESULTADO", "DESPESA"] if c in linhas.columns]
+            view = linhas[cols].copy()
+            if "DTA.PAG" in view.columns:
+                view["DTA.PAG"] = pd.to_datetime(view["DTA.PAG"], errors="coerce", dayfirst=True).dt.strftime("%d/%m/%Y").fillna("—")
+            view["Valor"] = linhas["_v"].map(fmt_brl_display)
+            st.dataframe(view, use_container_width=True, hide_index=True)
+    st.caption(f"TOTAL DO ANO: {fmt_brl_display(total)}")
+
+
 # =========================
 # Página 1: DRE Geral
 # =========================
@@ -899,7 +952,7 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     pct_sel = (soma_sel / receita_mes * 100.0) if receita_mes != 0 else 0.0
     st.metric("Total da despesa selecionada", f"R$ {format_brl(soma_sel)}", fmt_pct(pct_sel))
 
-    tab_sint, tab_fav, tab_det = st.tabs(["Histórico sintetizado", "Histórico sintetizado por Favorecido", "Histórico detalhado"])
+    tab_sint, tab_fav, tab_det, tab_evol = st.tabs(["Histórico sintetizado", "Histórico sintetizado por Favorecido", "Histórico detalhado", "Evolução mensal"])
     with tab_sint:
         key = pick_hist_key(raw_sel)
         if key is None:
@@ -943,6 +996,33 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
         view = raw_sel[cols].copy() if cols else raw_sel.copy()
         st.dataframe(view.style.format({"VAL.PAG": lambda x: f"R$ {format_brl(to_num(x))}"}).hide(axis="index"),
                      use_container_width=True)
+
+
+    with tab_evol:
+        # Recria o mesmo recorte por conta de resultado, sem restringir ao mês do drill.
+        if grupo_sel == "OUTRAS RECEITAS":
+            anual = g[_mask_outras_receitas(g)].copy()
+        else:
+            mapa = {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)": "00004 -", "DESPESAS COM PESSOAL": "00006 -", "DESPESAS ADMINISTRATIVAS": "00007 -", "DESPESAS COMERCIAIS": "00009 -", "DESPESAS FINANCEIRAS": "00011 -", "RETIRADAS SÓCIOS": "00016 -", "INVESTIMENTOS": "00015 -", "DESPESAS OPERACIONAIS": "00017 -"}
+            prefixo = mapa.get(grupo_sel, "")
+            anual = g[g["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefixo)].copy()
+        if grupo_sel in {"DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", "DESPESAS COM PESSOAL"}:
+            # No DRE o pagamento de fevereiro compõe janeiro, inclusive janeiro do próximo ano -> dezembro.
+            prox = prep_geral_year(excel_path, int(ano_ref) + 1, sig)
+            if prox is not None and not prox.empty:
+                prox = prox[prox["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefixo) & (prox["_mes"] == 1)].copy()
+                anual = pd.concat([anual, prox], ignore_index=True)
+            if grupo_sel == "DEDUÇÕES (IMPOSTOS SOBRE VENDAS)":
+                if "DESPESA" in anual.columns:
+                    filtro = anual["DESPESA"].astype(str).apply(_norm_txt)
+                    anual = anual[~filtro.str.contains("02.07.008", regex=False) & ~filtro.str.contains(_norm_txt(_DED_EXCL_DRE), regex=False)].copy()
+            anual["_mes_exibicao"] = pd.to_numeric(anual["_mes"], errors="coerce") - 1
+            anual.loc[anual["_mes_exibicao"] == 0, "_mes_exibicao"] = 12
+            # Janeiro do ano atual pertence a dezembro do ano anterior.
+            anual = anual[~((anual["_ano"] == int(ano_ref)) & (anual["_mes"] == 1))].copy()
+        else:
+            anual["_mes_exibicao"] = anual["_mes"]
+        render_evolucao_mensal(anual, desp_sel, ano_ref, "DRE", receita_total_by_month)
 
 
 # =========================
@@ -1229,7 +1309,7 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     pct_sel = (soma_sel / receb_mes * 100.0) if receb_mes != 0 else 0.0
     st.metric("Total da despesa selecionada", f"R$ {format_brl(soma_sel)}", fmt_pct(pct_sel))
 
-    tab_sint, tab_fav, tab_det = st.tabs(["Histórico sintetizado", "Histórico sintetizado por Favorecido", "Histórico detalhado"])
+    tab_sint, tab_fav, tab_det, tab_evol = st.tabs(["Histórico sintetizado", "Histórico sintetizado por Favorecido", "Histórico detalhado", "Evolução mensal"])
     with tab_sint:
         key = pick_hist_key(raw_sel)
         if key is None:
@@ -1273,6 +1353,16 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
         view = raw_sel[cols].copy() if cols else raw_sel.copy()
         st.dataframe(view.style.format({"VAL.PAG": lambda x: f"R$ {format_brl(to_num(x))}"}).hide(axis="index"),
                      use_container_width=True)
+
+
+    with tab_evol:
+        anual = g.copy()
+        if grupo_sel == "OUTRAS RECEITAS":
+            anual = anual[_mask_outras_receitas(anual)].copy()
+        elif prefix:
+            anual = anual[anual["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)].copy()
+        anual["_mes_exibicao"] = anual["_mes"]
+        render_evolucao_mensal(anual, desp_sel, ano_ref, "DFC", receb_total_by_month)
 
 
 # =========================
