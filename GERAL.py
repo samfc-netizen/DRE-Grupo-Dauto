@@ -541,6 +541,152 @@ def render_evolucao_mensal(base_ano, despesa, ano_ref, modo, denominadores=None)
     st.caption(f"TOTAL DO ANO: {fmt_brl_display(total)}")
 
 
+# Comparativo entre períodos: utiliza as mesmas fontes e regras dos demonstrativos.
+@st.cache_data(show_spinner=False)
+def dados_comparativo_linhas(excel_path, ano, sig, tipo):
+    g = prep_geral_year(excel_path, ano, sig)
+    if g is None:
+        return None
+    def prefixo(codigo):
+        return sum_by_prefix_prepped(g, codigo + " -")
+    def soma(*series):
+        return {m: sum(float(d.get(m, 0)) for d in series) for m in range(1, 13)}
+    outras = sum_outras_receitas_prepped(g)
+    adm, com, fin = prefixo("00007"), prefixo("00009"), prefixo("00011")
+    ret, inv, op = prefixo("00016"), prefixo("00015"), prefixo("00017")
+    if tipo == "DFC":
+        df = read_sheet(excel_path, "RECEBIMENTO", sig)
+        if df is None:
+            return None
+        cols = {str(c).strip().upper(): c for c in df.columns}
+        mes = cols.get("MÊS", cols.get("MESES", cols.get("MES")))
+        valor = cols.get("RECEBIMENTO TOTAL", cols.get("RECEBIMENTO"))
+        if not all([cols.get("ANO"), mes, valor]):
+            return None
+        receb = agg_by_month_from_ano_mes(df, valor, cols["ANO"], mes, ano)
+        if receb is None:
+            return None
+        base = soma(receb, outras)
+        forn, ded, pessoal = prefixo("00012"), prefixo("00004"), prefixo("00006")
+        saidas = soma(forn, ded, pessoal, adm, com, fin, ret, inv, op)
+        saldo = {m: base[m] - saidas[m] for m in range(1, 13)}
+        antes = soma(saldo, fin, ret, inv)
+        linhas = [("+ RECEBIMENTOS", receb), ("+ OUTRAS RECEITAS", outras),
+                  ("- FORNECEDORES", forn), ("- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", ded),
+                  ("- DESPESAS COM PESSOAL", pessoal), ("- DESPESAS ADMINISTRATIVAS", adm),
+                  ("- DESPESAS COMERCIAIS", com), ("- DESPESAS FINANCEIRAS", fin),
+                  ("- RETIRADAS SÓCIOS", ret), ("- INVESTIMENTOS", inv),
+                  ("- DESPESAS OPERACIONAIS", op), ("TOTAL DESPESAS", saidas),
+                  ("RESULTADO ANTES DAS RETIRADAS, DESP. FINANCEIRAS e INVESTIMENTOS", antes),
+                  ("SALDO OPERACIONAL", saldo)]
+    else:
+        df_rec = read_sheet(excel_path, "RECEITA", sig)
+        df_compras = read_sheet(excel_path, "NOTAS EMITIDAS", sig)
+        if df_rec is None or df_compras is None:
+            return None
+        receita = agg_by_month_from_ano_mes(df_rec, "RECEITA GRUPO", "ANO", "MÊS", ano)
+        compras = agg_by_month_from_ano_mes(df_compras, "NFS EMITIDAS", "ANO", "MÊS", ano)
+        if receita is None or compras is None:
+            return None
+        base = soma(receita, outras)
+        g_prox = prep_geral_year(excel_path, ano + 1, sig)
+        def deslocada(codigo, excluir_st=False):
+            def filtrado(d):
+                if d is None:
+                    return pd.DataFrame(columns=["_mes", "_v"])
+                x = d[d["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(codigo + " -")].copy()
+                if excluir_st:
+                    for c in ["DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"]:
+                        if c in x.columns:
+                            norm = x[c].astype(str).apply(_norm_txt)
+                            x = x[~norm.str.contains(_norm_txt(_DED_EXCL_DRE), regex=False, na=False)]
+                            norm = x[c].astype(str).apply(_norm_txt)
+                            x = x[~norm.str.contains("02.07.008", regex=False, na=False)]
+                            break
+                return x
+            atual = filtrado(g).groupby("_mes")["_v"].sum()
+            proximo = filtrado(g_prox).groupby("_mes")["_v"].sum()
+            return {m: float(atual.get(m + 1, 0)) if m < 12 else float(proximo.get(1, 0)) for m in range(1, 13)}
+        ded, pessoal = deslocada("00004", True), deslocada("00006")
+        despesas = soma(compras, ded, pessoal, adm, com, fin, ret, inv, op)
+        resultado = {m: base[m] - despesas[m] for m in range(1, 13)}
+        antes = soma(resultado, fin, ret, inv)
+        linhas = [("+ RECEITA", receita), ("+ OUTRAS RECEITAS", outras),
+                  ("- COMPRAS EMISSÃO", compras), ("- DEDUÇÕES (IMPOSTOS SOBRE VENDAS)", ded),
+                  ("- DESPESAS COM PESSOAL", pessoal), ("- DESPESAS ADMINISTRATIVAS", adm),
+                  ("- DESPESAS COMERCIAIS", com), ("- DESPESAS FINANCEIRAS", fin),
+                  ("- RETIRADAS SÓCIOS", ret), ("- INVESTIMENTOS", inv),
+                  ("- DESPESAS OPERACIONAIS", op), ("TOTAL DESPESAS", despesas),
+                  ("RESULTADO ANTES DAS RETIRADAS, DESP. FINANCEIRAS e INVESTIMENTOS", antes),
+                  ("RESULTADO OPERACIONAL", resultado)]
+    return dict(linhas), base
+
+
+def render_comparativo_linhas(excel_path, tipo, ano_padrao, linhas):
+    st.markdown("### Comparativo de linhas por período")
+    st.caption("Compare qualquer linha do demonstrativo entre dois meses, inclusive de anos diferentes. "
+               "A participação considera a Receita Total (DRE) ou os Recebimentos Totais (DFC), incluindo Outras Receitas.")
+    anos = set()
+    for aba in (["RECEITA", "DRE E DFC GERAL"] if tipo == "DRE" else ["RECEBIMENTO", "DRE E DFC GERAL"]):
+        df = read_sheet(excel_path, aba, sig)
+        if df is None:
+            continue
+        if "ANO" in df.columns:
+            anos.update(pd.to_numeric(df["ANO"], errors="coerce").dropna().astype(int).tolist())
+        if "DTA.PAG" in df.columns:
+            anos.update(pd.to_datetime(df["DTA.PAG"], errors="coerce", dayfirst=True).dt.year.dropna().astype(int).tolist())
+    anos = sorted(y for y in anos if 2000 <= y <= 2100)
+    if not anos:
+        anos = [int(ano_padrao)]
+    col_linha, col_a, col_b = st.columns([2.1, 1, 1])
+    with col_linha:
+        linha = st.selectbox("Linha do demonstrativo", linhas, key=f"comp_linha_{tipo}")
+    with col_a:
+        st.markdown("**Período 01 (A)**")
+        ano_a = st.selectbox("Ano A", anos, index=anos.index(ano_padrao) if ano_padrao in anos else len(anos)-1, key=f"comp_ano_a_{tipo}")
+        mes_a = st.selectbox("Mês A", MESES_PT, index=0, key=f"comp_mes_a_{tipo}")
+    with col_b:
+        st.markdown("**Período 02 (B)**")
+        ano_b = st.selectbox("Ano B", anos, index=anos.index(ano_padrao) if ano_padrao in anos else len(anos)-1, key=f"comp_ano_b_{tipo}")
+        mes_b = st.selectbox("Mês B", MESES_PT, index=min(pd.Timestamp.today().month-1, 11), key=f"comp_mes_b_{tipo}")
+    dados_a = dados_comparativo_linhas(excel_path, ano_a, sig, tipo)
+    dados_b = dados_comparativo_linhas(excel_path, ano_b, sig, tipo)
+    if dados_a is None or dados_b is None:
+        st.warning("Não foi possível calcular os períodos: verifique as abas e colunas da planilha.")
+        return
+    n_a, n_b = MES_PT_TO_NUM[mes_a], MES_PT_TO_NUM[mes_b]
+    v_a = float(dados_a[0][linha].get(n_a, 0))
+    v_b = float(dados_b[0][linha].get(n_b, 0))
+    base_a = float(dados_a[1].get(n_a, 0))
+    base_b = float(dados_b[1].get(n_b, 0))
+    pct_a = v_a / base_a * 100 if base_a else None
+    pct_b = v_b / base_b * 100 if base_b else None
+    variacao = (v_b - v_a) / abs(v_a) * 100 if v_a else None
+    dif_pp = pct_b - pct_a if pct_a is not None and pct_b is not None else None
+    titulo_base = "Receita" if tipo == "DRE" else "Recebimentos"
+    a_label, b_label = f"{mes_a}/{ano_a}", f"{mes_b}/{ano_b}"
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"A · {a_label}", fmt_brl_display(v_a))
+    c2.metric(f"B · {b_label}", fmt_brl_display(v_b))
+    c3.metric("Diferença B − A", fmt_brl_display(v_b - v_a))
+    c4.metric("Variação B vs. A", fmt_pct(variacao) if variacao is not None else "N/D")
+    tabela = pd.DataFrame([
+        {"Indicador": "Valor da linha", a_label: fmt_brl_display(v_a), b_label: fmt_brl_display(v_b), "Diferença (B − A)": fmt_brl_display(v_b-v_a)},
+        {"Indicador": titulo_base + " total", a_label: fmt_brl_display(base_a), b_label: fmt_brl_display(base_b), "Diferença (B − A)": fmt_brl_display(base_b-base_a)},
+        {"Indicador": "% sobre " + titulo_base, a_label: fmt_pct(pct_a) if pct_a is not None else "N/D", b_label: fmt_pct(pct_b) if pct_b is not None else "N/D", "Diferença (B − A)": f"{dif_pp:+.2f} p.p.".replace(".", ",") if dif_pp is not None else "N/D"},
+    ])
+    st.dataframe(tabela, hide_index=True, use_container_width=True)
+    fig = px.bar(pd.DataFrame({"Período": ["A · " + a_label, "B · " + b_label], "Valor": [v_a, v_b]}),
+                 x="Período", y="Valor", text="Valor", title="Comparativo da linha selecionada")
+    fig.update_traces(texttemplate="R$ %{y:,.2f}", textposition="outside")
+    fig.update_layout(showlegend=False, paper_bgcolor="white", plot_bgcolor="white", margin=dict(l=10, r=10, t=45, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+    if variacao is None:
+        st.caption("Variação percentual indisponível: o valor do período A é zero.")
+    if pct_a is None or pct_b is None:
+        st.caption(f"Participação percentual indisponível em período com {titulo_base.lower()} totais iguais a zero.")
+
+
 # =========================
 # Página 1: DRE Geral
 # =========================
@@ -782,6 +928,8 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     value_cols_dre = list(meses_pt) + ["ACUMULADO"]
     pct_cols_dre = [f"%{m}" for m in meses_pt] + ["%ACUMULADO"]
     render_sticky_table(dre, value_cols=value_cols_dre, pct_cols=pct_cols_dre, highlight_row_label="RESULTADO OPERACIONAL")
+
+    render_comparativo_linhas(excel_path, "DRE", ano_ref, dre["Linha"].dropna().tolist())
 
     # Indicadores por Linha (Soma e Média) — respeita Ano/Meses do filtro lateral
     st.markdown("### Indicadores por linha (Soma e Média)")
@@ -1173,6 +1321,8 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     value_cols_dfc = list(meses_pt) + ["ACUMULADO"]
     pct_cols_dfc = [f"%{m}" for m in meses_pt] + ["%ACUMULADO"]
     render_sticky_table(dfc, value_cols=value_cols_dfc, pct_cols=pct_cols_dfc, highlight_row_label="SALDO OPERACIONAL")
+
+    render_comparativo_linhas(excel_path, "DFC", ano_ref, dfc["Linha"].dropna().tolist())
 
     # Indicadores por Linha (Soma e Média) — respeita Ano/Meses do filtro lateral
     st.markdown("### Indicadores por linha (Soma e Média)")
