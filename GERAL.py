@@ -624,7 +624,7 @@ def dados_comparativo_linhas(excel_path, ano, sig, tipo):
 
 def render_comparativo_linhas(excel_path, tipo, ano_padrao, linhas):
     st.markdown("### Comparativo de linhas por período")
-    st.caption("Compare qualquer linha do demonstrativo entre dois meses, inclusive de anos diferentes. "
+    st.caption("Compare qualquer linha do demonstrativo entre dois conjuntos de meses, inclusive de anos diferentes. "
                "A participação considera a Receita Total (DRE) ou os Recebimentos Totais (DFC), incluindo Outras Receitas.")
     anos = set()
     for aba in (["RECEITA", "DRE E DFC GERAL"] if tipo == "DRE" else ["RECEBIMENTO", "DRE E DFC GERAL"]):
@@ -644,32 +644,45 @@ def render_comparativo_linhas(excel_path, tipo, ano_padrao, linhas):
     with col_a:
         st.markdown("**Período 01 (A)**")
         ano_a = st.selectbox("Ano A", anos, index=anos.index(ano_padrao) if ano_padrao in anos else len(anos)-1, key=f"comp_ano_a_{tipo}")
-        mes_a = st.selectbox("Mês A", MESES_PT, index=0, key=f"comp_mes_a_{tipo}")
+        meses_a = st.multiselect("Meses A", MESES_PT, default=MESES_PT, key=f"comp_meses_a_{tipo}", help="Selecione vários meses ou use Todos os meses.")
+        todos_a = st.checkbox("Todos os meses (A)", value=True, key=f"comp_todos_a_{tipo}")
     with col_b:
         st.markdown("**Período 02 (B)**")
         ano_b = st.selectbox("Ano B", anos, index=anos.index(ano_padrao) if ano_padrao in anos else len(anos)-1, key=f"comp_ano_b_{tipo}")
-        mes_b = st.selectbox("Mês B", MESES_PT, index=min(pd.Timestamp.today().month-1, 11), key=f"comp_mes_b_{tipo}")
+        meses_b = st.multiselect("Meses B", MESES_PT, default=MESES_PT, key=f"comp_meses_b_{tipo}", help="Selecione vários meses ou use Todos os meses.")
+        todos_b = st.checkbox("Todos os meses (B)", value=True, key=f"comp_todos_b_{tipo}")
     dados_a = dados_comparativo_linhas(excel_path, ano_a, sig, tipo)
     dados_b = dados_comparativo_linhas(excel_path, ano_b, sig, tipo)
     if dados_a is None or dados_b is None:
         st.warning("Não foi possível calcular os períodos: verifique as abas e colunas da planilha.")
         return
-    n_a, n_b = MES_PT_TO_NUM[mes_a], MES_PT_TO_NUM[mes_b]
-    v_a = float(dados_a[0][linha].get(n_a, 0))
-    v_b = float(dados_b[0][linha].get(n_b, 0))
-    base_a = float(dados_a[1].get(n_a, 0))
-    base_b = float(dados_b[1].get(n_b, 0))
+    meses_a = MESES_PT if todos_a else meses_a
+    meses_b = MESES_PT if todos_b else meses_b
+    if not meses_a or not meses_b:
+        st.info("Selecione pelo menos um mês em cada período ou marque Todos os meses.")
+        return
+    nums_a = [MES_PT_TO_NUM[m] for m in meses_a]
+    nums_b = [MES_PT_TO_NUM[m] for m in meses_b]
+    v_a = sum(float(dados_a[0][linha].get(m, 0)) for m in nums_a)
+    v_b = sum(float(dados_b[0][linha].get(m, 0)) for m in nums_b)
+    base_a = sum(float(dados_a[1].get(m, 0)) for m in nums_a)
+    base_b = sum(float(dados_b[1].get(m, 0)) for m in nums_b)
     pct_a = v_a / base_a * 100 if base_a else None
     pct_b = v_b / base_b * 100 if base_b else None
     variacao = (v_b - v_a) / abs(v_a) * 100 if v_a else None
     dif_pp = pct_b - pct_a if pct_a is not None and pct_b is not None else None
     titulo_base = "Receita" if tipo == "DRE" else "Recebimentos"
-    a_label, b_label = f"{mes_a}/{ano_a}", f"{mes_b}/{ano_b}"
+    def rotulo(meses, ano):
+        if len(meses) == 12:
+            return f"Todos/{ano}"
+        return f"{', '.join(meses)}/{ano}"
+    a_label, b_label = rotulo(meses_a, ano_a), rotulo(meses_b, ano_b)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"A · {a_label}", fmt_brl_display(v_a))
     c2.metric(f"B · {b_label}", fmt_brl_display(v_b))
     c3.metric("Diferença B − A", fmt_brl_display(v_b - v_a))
     c4.metric("Variação B vs. A", fmt_pct(variacao) if variacao is not None else "N/D")
+    st.caption(f"Período A: {a_label} | Período B: {b_label}. Valores e bases são somados nos meses selecionados.")
     tabela = pd.DataFrame([
         {"Indicador": "Valor da linha", a_label: fmt_brl_display(v_a), b_label: fmt_brl_display(v_b), "Diferença (B − A)": fmt_brl_display(v_b-v_a)},
         {"Indicador": titulo_base + " total", a_label: fmt_brl_display(base_a), b_label: fmt_brl_display(base_b), "Diferença (B − A)": fmt_brl_display(base_b-base_a)},
@@ -929,7 +942,6 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     pct_cols_dre = [f"%{m}" for m in meses_pt] + ["%ACUMULADO"]
     render_sticky_table(dre, value_cols=value_cols_dre, pct_cols=pct_cols_dre, highlight_row_label="RESULTADO OPERACIONAL")
 
-    render_comparativo_linhas(excel_path, "DRE", ano_ref, dre["Linha"].dropna().tolist())
 
     # Indicadores por Linha (Soma e Média) — respeita Ano/Meses do filtro lateral
     st.markdown("### Indicadores por linha (Soma e Média)")
@@ -1172,6 +1184,9 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
             anual["_mes_exibicao"] = anual["_mes"]
         render_evolucao_mensal(anual, desp_sel, ano_ref, "DRE", receita_total_by_month)
 
+    st.divider()
+    render_comparativo_linhas(excel_path, "DRE", ano_ref, dre["Linha"].dropna().tolist())
+
 
 # =========================
 # Página 2: DFC (FORNECEDORES = 00012)
@@ -1322,7 +1337,6 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     pct_cols_dfc = [f"%{m}" for m in meses_pt] + ["%ACUMULADO"]
     render_sticky_table(dfc, value_cols=value_cols_dfc, pct_cols=pct_cols_dfc, highlight_row_label="SALDO OPERACIONAL")
 
-    render_comparativo_linhas(excel_path, "DFC", ano_ref, dfc["Linha"].dropna().tolist())
 
     # Indicadores por Linha (Soma e Média) — respeita Ano/Meses do filtro lateral
     st.markdown("### Indicadores por linha (Soma e Média)")
@@ -1513,6 +1527,9 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
             anual = anual[anual["CONTA DE RESULTADO"].astype(str).str.strip().str.startswith(prefix)].copy()
         anual["_mes_exibicao"] = anual["_mes"]
         render_evolucao_mensal(anual, desp_sel, ano_ref, "DFC", receb_total_by_month)
+
+    st.divider()
+    render_comparativo_linhas(excel_path, "DFC", ano_ref, dfc["Linha"].dropna().tolist())
 
 
 # =========================
