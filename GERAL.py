@@ -452,6 +452,19 @@ def sum_by_prefix_prepped(g: pd.DataFrame, prefix: str):
     return {m: float(grp.get(m, 0.0)) for m in range(1, 13)}
 
 
+def _mask_abatimento_boleto(df: pd.DataFrame) -> pd.Series:
+    """Identifica abatimentos de boletos, sem confundir com receitas legítimas."""
+    mask = pd.Series(False, index=df.index, dtype=bool)
+    # Identificação prioritária no plano de contas; descrição auxilia variações de cadastro.
+    for coluna in ("CONTA DE RESULTADO", "DESPESA", "HISTÓRICO", "HISTORICO"):
+        if coluna not in df.columns:
+            continue
+        texto = df[coluna].fillna("").astype(str).apply(_norm_txt)
+        padrao = r"(?:\babr\.?\s*boleto\b|\babat(?:imento|er|ido|idos|imentos)?\s+(?:de\s+|do\s+|dos\s+|em\s+)?boletos?\b|\bboletos?\s+(?:abatid[oa]s?|com\s+abatimento)\b)"
+        mask |= texto.str.contains(padrao, regex=True, na=False)
+    return mask
+
+
 def _mask_outras_receitas(df: pd.DataFrame) -> pd.Series:
     """Identifica Outras Receitas na aba DRE E DFC GERAL / CONTA DE RESULTADO."""
     conta = df.get("CONTA DE RESULTADO", pd.Series([""] * len(df), index=df.index)).astype(str)
@@ -466,6 +479,15 @@ def sum_outras_receitas_prepped(g: pd.DataFrame):
     if g is None or g.empty:
         return {m: 0.0 for m in range(1, 13)}
     mask = _mask_outras_receitas(g)
+    grp = g[mask].groupby("_mes")["_v"].sum()
+    return {m: float(grp.get(m, 0.0)) for m in range(1, 13)}
+
+
+def sum_abatimentos_outras_receitas_prepped(g: pd.DataFrame):
+    """Abatimentos exibidos em Outras Receitas, mas não computados no resultado DFC."""
+    if g is None or g.empty:
+        return {m: 0.0 for m in range(1, 13)}
+    mask = _mask_outras_receitas(g) & _mask_abatimento_boleto(g)
     grp = g[mask].groupby("_mes")["_v"].sum()
     return {m: float(grp.get(m, 0.0)) for m in range(1, 13)}
 
@@ -566,7 +588,8 @@ def dados_comparativo_linhas(excel_path, ano, sig, tipo):
         receb = agg_by_month_from_ano_mes(df, valor, cols["ANO"], mes, ano)
         if receb is None:
             return None
-        base = soma(receb, outras)
+        abatimentos = sum_abatimentos_outras_receitas_prepped(g)
+        base = {m: receb[m] + outras[m] - abatimentos[m] for m in range(1, 13)}
         forn, ded, pessoal = prefixo("00012"), prefixo("00004"), prefixo("00006")
         saidas = soma(forn, ded, pessoal, adm, com, fin, ret, inv, op)
         saldo = {m: base[m] - saidas[m] for m in range(1, 13)}
@@ -1242,13 +1265,15 @@ def pagina_dfc_geral(excel_path, ano_ref, meses_pt_sel=None):
     inv_by_month = sum_by_prefix_prepped(g, pmap["INVESTIMENTOS"])
     op_by_month = sum_by_prefix_prepped(g, pmap["DESPESAS OPERACIONAIS"])
     outras_receitas_by_month = sum_outras_receitas_prepped(g)
+    abatimentos_by_month = sum_abatimentos_outras_receitas_prepped(g)
     receb_total_by_month = {m: float(receb_by_month.get(m, 0.0)) + float(outras_receitas_by_month.get(m, 0.0)) for m in range(1, 13)}
+    receb_resultado_by_month = {m: receb_total_by_month[m] - abatimentos_by_month[m] for m in range(1, 13)}
 
     saldo_by_month = {}
     for m in range(1, 13):
         saidas = (fornec_by_month[m] + ded_by_month[m] + pessoal_by_month[m] + adm_by_month[m] +
                   com_by_month[m] + fin_by_month[m] + inv_by_month[m] + op_by_month[m] + ret_by_month[m])
-        saldo_by_month[m] = receb_total_by_month[m] - saidas
+        saldo_by_month[m] = receb_resultado_by_month[m] - saidas
 
     # Total de todas as despesas/saídas exibidas acima
     total_despesas_by_month = {
