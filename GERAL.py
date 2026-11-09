@@ -453,25 +453,26 @@ def sum_by_prefix_prepped(g: pd.DataFrame, prefix: str):
 
 
 def _mask_abatimento_boleto(df: pd.DataFrame) -> pd.Series:
-    """Identifica abatimentos de boletos, sem confundir com receitas legítimas."""
-    mask = pd.Series(False, index=df.index, dtype=bool)
-    # Identificação prioritária no plano de contas; descrição auxilia variações de cadastro.
-    for coluna in ("CONTA DE RESULTADO", "DESPESA", "HISTÓRICO", "HISTORICO"):
-        if coluna not in df.columns:
-            continue
-        texto = df[coluna].fillna("").astype(str).apply(_norm_txt)
-        padrao = r"(?:\babr\.?\s*boleto\b|\babat(?:imento|er|ido|idos|imentos)?\s+(?:de\s+|do\s+|dos\s+|em\s+)?boletos?\b|\bboletos?\s+(?:abatid[oa]s?|com\s+abatimento)\b)"
-        mask |= texto.str.contains(padrao, regex=True, na=False)
-    return mask
+    """Reconhece abatimento de boleto pelo PLANO DE CONTAS, inclusive abreviações."""
+    conta = df.get("CONTA DE RESULTADO", pd.Series("", index=df.index))
+    texto = conta.fillna("").astype(str).apply(_norm_txt)
+    # Pontos, barras, hífens e espaços são equivalentes entre os termos.
+    texto = texto.str.replace(r"[^a-z0-9]+", " ", regex=True).str.strip()
+    padrao = (
+        r"\b(?:abat(?:imento|imentos|e|er|ido|ida|idos|idas)?|aba|abr)\s*"
+        r"(?:de|do|dos|em)?\s*boletos?\b"
+        r"|\bboletos?\s*(?:abatid[oa]s?|com\s+abatimento)\b"
+    )
+    return texto.str.contains(padrao, regex=True, na=False)
 
 
 def _mask_outras_receitas(df: pd.DataFrame) -> pd.Series:
-    """Identifica Outras Receitas na aba DRE E DFC GERAL / CONTA DE RESULTADO."""
-    conta = df.get("CONTA DE RESULTADO", pd.Series([""] * len(df), index=df.index)).astype(str)
+    """Inclui outras receitas normais e abatimentos de boleto para exibição."""
+    conta = df.get("CONTA DE RESULTADO", pd.Series("", index=df.index)).fillna("").astype(str)
     conta_norm = conta.apply(_norm_txt)
-    mask = conta.str.strip().str.startswith("00003 -", na=False)
-    mask = mask | conta_norm.str.contains("outras receitas", na=False)
-    return mask
+    mask = conta_norm.str.match(r"^00003\s*-")
+    mask = mask | conta_norm.str.contains("outras receitas", regex=False, na=False)
+    return mask | _mask_abatimento_boleto(df)
 
 
 def sum_outras_receitas_prepped(g: pd.DataFrame):
@@ -484,7 +485,7 @@ def sum_outras_receitas_prepped(g: pd.DataFrame):
 
 
 def sum_abatimentos_outras_receitas_prepped(g: pd.DataFrame):
-    """Abatimentos exibidos em Outras Receitas, mas não computados no resultado DFC."""
+    """Abatimentos exibidos em Outras Receitas, mas excluídos do DRE e DFC."""
     if g is None or g.empty:
         return {m: 0.0 for m in range(1, 13)}
     mask = _mask_outras_receitas(g) & _mask_abatimento_boleto(g)
@@ -574,6 +575,7 @@ def dados_comparativo_linhas(excel_path, ano, sig, tipo):
     def soma(*series):
         return {m: sum(float(d.get(m, 0)) for d in series) for m in range(1, 13)}
     outras = sum_outras_receitas_prepped(g)
+    abatimentos = sum_abatimentos_outras_receitas_prepped(g)
     adm, com, fin = prefixo("00007"), prefixo("00009"), prefixo("00011")
     ret, inv, op = prefixo("00016"), prefixo("00015"), prefixo("00017")
     if tipo == "DFC":
@@ -611,7 +613,7 @@ def dados_comparativo_linhas(excel_path, ano, sig, tipo):
         compras = agg_by_month_from_ano_mes(df_compras, "NFS EMITIDAS", "ANO", "MÊS", ano)
         if receita is None or compras is None:
             return None
-        base = soma(receita, outras)
+        base = {m: receita[m] + outras[m] - abatimentos[m] for m in range(1, 13)}
         g_prox = prep_geral_year(excel_path, ano + 1, sig)
         def deslocada(codigo, excluir_st=False):
             def filtrado(d):
@@ -831,7 +833,8 @@ def pagina_dre_geral(excel_path, ano_ref, meses_pt_sel=None):
     op_by_month = sum_by_prefix("00017 -")
     ret_by_month = sum_by_prefix("00016 -")
     outras_receitas_by_month = sum_outras_receitas_prepped(g)
-    receita_total_by_month = {m: float(receita_by_month.get(m, 0.0)) + float(outras_receitas_by_month.get(m, 0.0)) for m in range(1, 13)}
+    abatimentos_by_month = sum_abatimentos_outras_receitas_prepped(g)
+    receita_total_by_month = {m: float(receita_by_month.get(m, 0.0)) + float(outras_receitas_by_month.get(m, 0.0)) - float(abatimentos_by_month.get(m, 0.0)) for m in range(1, 13)}
 
     resultado_by_month = {}
     for m in range(1, 13):
