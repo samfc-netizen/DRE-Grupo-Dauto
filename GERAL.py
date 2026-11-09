@@ -453,17 +453,24 @@ def sum_by_prefix_prepped(g: pd.DataFrame, prefix: str):
 
 
 def _mask_abatimento_boleto(df: pd.DataFrame) -> pd.Series:
-    """Reconhece abatimento de boleto pelo PLANO DE CONTAS, inclusive abreviações."""
-    conta = df.get("CONTA DE RESULTADO", pd.Series("", index=df.index))
-    texto = conta.fillna("").astype(str).apply(_norm_txt)
-    # Pontos, barras, hífens e espaços são equivalentes entre os termos.
-    texto = texto.str.replace(r"[^a-z0-9]+", " ", regex=True).str.strip()
+    """Identifica abatimento de boleto no plano de contas detalhado (DESPESA).
+
+    Aceita também CONTA DE RESULTADO e descrições auxiliares, quando presentes.
+    Não altera a classificação nem o valor original do lançamento.
+    """
     padrao = (
         r"\b(?:abat(?:imento|imentos|e|er|ido|ida|idos|idas)?|aba|abr)\s*"
-        r"(?:de|do|dos|em)?\s*boletos?\b"
+        r"(?:de|do|dos|da|das|em)?\s*boletos?\b"
         r"|\bboletos?\s*(?:abatid[oa]s?|com\s+abatimento)\b"
     )
-    return texto.str.contains(padrao, regex=True, na=False)
+    resultado = pd.Series(False, index=df.index, dtype=bool)
+    for coluna in ("DESPESA", "CONTA DE RESULTADO", "HISTÓRICO", "HISTORICO"):
+        if coluna not in df.columns:
+            continue
+        texto = df[coluna].fillna("").astype(str).map(_norm_txt)
+        texto = texto.str.replace(r"[^a-z0-9]+", " ", regex=True).str.strip()
+        resultado = resultado | texto.str.contains(padrao, regex=True, na=False)
+    return resultado
 
 
 def _mask_outras_receitas(df: pd.DataFrame) -> pd.Series:
