@@ -266,6 +266,40 @@ def get_sheet_names(excel_path: str, sig):
     except Exception:
         return []
 
+# Exclusão de operações internas do Grupo Dauto na compra para revenda.
+# Aplicada na leitura da aba financeira, antes de qualquer consolidação ou drill-down.
+_FAVORECIDOS_COMPRA_INTERNA = frozenset({
+    "MERCADO DAS TINTAS LTDA",
+    "DT TINTAS COMERCIO VAREJISTA LIMITADA",
+    "ETICA COMERCIO VAREJISTA DE TINTAS LTDA",
+    "V&T COMERCIO VAREJISTA DE TINTAS LTDA",
+})
+
+
+def _normalizar_compra_interna(valor):
+    if pd.isna(valor):
+        return ""
+    texto = unicodedata.normalize("NFKD", str(valor).upper())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", texto.replace("\u00a0", " ")).strip()
+
+
+def _excluir_compras_internas(df: pd.DataFrame) -> pd.DataFrame:
+    """Retira apenas compras para revenda de favorecidos internos, sem mudar a base Excel."""
+    campos = {"CONTA DE RESULTADO", "DESPESA", "FAVORECIDO"}
+    if not campos.issubset(df.columns):
+        return df
+    conta = df["CONTA DE RESULTADO"].map(_normalizar_compra_interna)
+    despesa = df["DESPESA"].map(_normalizar_compra_interna)
+    favorecido = df["FAVORECIDO"].map(_normalizar_compra_interna)
+    excluir = (
+        conta.str.match(r"^00012\s*-\s*FORNECEDORES\s*$", na=False)
+        & despesa.str.match(r"^02\.10\.006\s*-\s*COMPRA PARA REVENDA(?:\s*\(.*\))?\s*$", na=False)
+        & favorecido.isin(_FAVORECIDOS_COMPRA_INTERNA)
+    )
+    return df.loc[~excluir].copy()
+
+
 @st.cache_data(show_spinner=False)
 def read_sheet(excel_path: str, sheet_name: str, sig):
     """Lê uma aba do Excel com cache (melhora muito a navegação no Streamlit)."""
@@ -274,6 +308,8 @@ def read_sheet(excel_path: str, sheet_name: str, sig):
     except Exception:
         return None
     df.columns = [str(c).strip() for c in df.columns]
+    if sheet_name == "DRE E DFC GERAL":
+        df = _excluir_compras_internas(df)
     return df
 
 @st.cache_data(show_spinner=False)
