@@ -292,6 +292,8 @@ def _excluir_compras_internas(df: pd.DataFrame) -> pd.DataFrame:
     conta = df["CONTA DE RESULTADO"].map(_normalizar_compra_interna)
     despesa = df["DESPESA"].map(_normalizar_compra_interna)
     favorecido = df["FAVORECIDO"].map(_normalizar_compra_interna)
+    # O Autcom exporta o favorecido como CODIGO-RAZAO SOCIAL; o codigo varia.
+    favorecido = favorecido.str.replace(r"^\s*\d+\s*[-–—]\s*", "", regex=True)
     excluir = (
         conta.str.match(r"^00012\s*-\s*FORNECEDORES\s*$", na=False)
         & despesa.str.match(r"^02\.10\.006\s*-\s*COMPRA PARA REVENDA(?:\s*\(.*\))?\s*$", na=False)
@@ -2423,6 +2425,8 @@ def lojas_read_sheet(excel_path, sheet_name, sig):
     mapa = {'DRE':'DRE E DFC GERAL','RECEBIMENTOS':'RECEBIMENTO LOJAS', 'COMPRAS':'COMPRAS LOJAS','DEVOLUÇÕES':'DEVOLUÇÕES LOJAS'}
     df = pd.read_excel(excel_path, sheet_name=mapa.get(sheet_name,sheet_name))
     df.columns = [str(c).strip() for c in df.columns]
+    if mapa.get(sheet_name, sheet_name) == "DRE E DFC GERAL":
+        df = _excluir_compras_internas(df)
     return df
 
 # =========================
