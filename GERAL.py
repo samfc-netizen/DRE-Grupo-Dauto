@@ -1659,6 +1659,12 @@ def pagina_faturamento(excel_path, ano_ref, meses_pt_sel=None):
         st.info("Não há dados de faturamento para os filtros selecionados.")
         return
 
+    # ZEMA integra o canal OFICINAS DAUTO na exibição e nos consolidados.
+    # A coluna original ZEMA permanece na planilha, mas não deve ser somada
+    # novamente como canal independente (evita dupla contagem).
+    base["OFICINAS DAUTO final"] = base["OFICINAS DAUTO final"] + base["ZEMA"]
+    canais_base = [canal for canal in canais_base if canal != "ZEMA"]
+
     # Regras novas da página:
     # - FATURAMENTO ÚNICA = soma dos canais-base
     # - RECEITA GRUPO = FATURAMENTO ÚNICA + FATURAMENTO LOJAS DAUTO + SERVIÇO
@@ -2721,6 +2727,9 @@ def lojas_despesas_e_historicos(dre_det: pd.DataFrame,
     agg[pct_label] = (agg["Valor"] / denom * 100.0) if denom != 0 else 0.0
     agg = agg.sort_values("Valor", ascending=False)
 
+    # O conjunto de despesas varia conforme loja, meses e linha do drill.
+    # Não reutilizar estado de slider com limites diferentes: isso pode
+    # provocar StreamlitAPIException ao alternar filtros.
     qtd_despesas = len(agg)
     top_max = min(80, qtd_despesas)
 
@@ -2729,13 +2738,17 @@ def lojas_despesas_e_historicos(dre_det: pd.DataFrame,
         st.caption(f"Exibindo {topn} despesa disponível.")
     else:
         top_min = 1 if top_max < 5 else 5
-        top_def = min(15, top_max)
+        top_def = min(max(15, top_min), top_max)
+        # A chave inclui os limites válidos para impedir reaproveitamento
+        # de um valor de sessão incompatível após mudar os filtros.
+        slider_key = f"{key_prefix}_topn_{lojas__norm_txt(linha_sel)}_{top_min}_{top_max}"
         topn = st.slider(
             "Top N (despesas)",
-            min_value=top_min,
-            max_value=top_max,
-            value=max(top_min, top_def),
-            key=f"{key_prefix}_topn_{lojas__norm_txt(linha_sel)}",
+            min_value=int(top_min),
+            max_value=int(top_max),
+            value=int(top_def),
+            step=1,
+            key=slider_key,
         )
 
     agg_top = agg.head(topn).copy()
